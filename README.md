@@ -18,6 +18,7 @@ Built for **Track 1: MemoryAgent** — [Global AI Hackathon Series with Qwen Clo
 |---|---|
 | **Personal memory** | Screen → OCR / Accessibility → local SQLite + FTS5 (screenshots never saved) |
 | **Live screen** | “What’s on my screen?” / “Draft a reply to this email” uses the **frontmost** window |
+| **Show Me** | Step-by-step on-screen instructor (pointer + chat) — guides you, never clicks for you |
 | **Session chat** | Multi-turn awareness in the current chat; full **Chat History** of past sessions |
 | **Smart routing** | Direct · memory · live screen · web · hybrid — via Qwen when configured |
 | **Privacy** | Redaction, exclusions, local storage under Application Support |
@@ -29,6 +30,7 @@ Built for **Track 1: MemoryAgent** — [Global AI Hackathon Series with Qwen Clo
 | Type | Example |
 |---|---|
 | Live screen | “Can you see my screen?” |
+| Show Me | Toggle **Show Me**, then “Where can I find Capitalize?” |
 | Email assist | “Draft a reply for this email” |
 | Code context | “What am I looking at?” → “Is there any error in this?” |
 | Personal recall | “What was I researching about storage yesterday?” |

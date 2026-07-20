@@ -37,6 +37,7 @@ final class DependencyContainer {
     let qwenClient: QwenClient
     let webSearchService: WebSearchService
     let personalAgent: PersonalAgent
+    let showMePlanner: ShowMePlanner
 
     let episodeService: EpisodeService
 
@@ -115,6 +116,11 @@ final class DependencyContainer {
             hybridRetriever: hybridRetriever,
             chatLearningService: chatLearningService,
             observationPipeline: observationPipeline
+        )
+        showMePlanner = ShowMePlanner(
+            qwenClient: qwenClient,
+            observationPipeline: observationPipeline,
+            activeApplicationService: activeApplicationService
         )
     }
 }

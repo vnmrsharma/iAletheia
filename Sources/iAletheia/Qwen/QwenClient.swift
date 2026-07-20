@@ -924,6 +924,55 @@ final class QwenClient: QwenService {
         )
     }
 
+    func generateShowMePlan(
+        query: String,
+        snapshot: LiveScreenSnapshot?,
+        appName: String?,
+        windowTitle: String?
+    ) async throws -> ShowMePlan {
+        let system = """
+        You are iAletheia Show Me — an on-screen instructor.
+        The user wants a guided walkthrough of the CURRENT app/window. You do NOT click for them.
+        Return ONLY JSON (no markdown) with this shape:
+        {
+          "intro": "one short sentence",
+          "steps": [
+            {
+              "title": "short step title",
+              "instruction": "clear instruction of what the user should click/look at",
+              "target_hints": ["Home", "Capitalize"],
+              "region_hint": "ribbon",
+              "done_hint": "optional note"
+            }
+          ]
+        }
+        Rules:
+        - 3 to 6 concrete steps max.
+        - Steps must match the live screen / app when possible (Word ribbon, menus, etc.).
+        - target_hints: visible UI labels to search for (menu items, buttons, tabs).
+        - region_hint one of: menubar, ribbon, top, bottom, left, right, center.
+        - Never invent unrelated apps. Never say you will click for the user.
+        - Plain language. No markdown.
+        """
+        var prompt = """
+        User request: \(query)
+        Active app: \(appName ?? "unknown")
+        Window title: \(windowTitle ?? "unknown")
+        """
+        if let snapshot {
+            prompt += "\n\nLIVE SCREEN SNAPSHOT:\n\(snapshot.contextBlock())"
+        }
+        prompt += "\n\nCreate a Show Me walkthrough JSON for this request."
+
+        let content = try await chatCompletionFast(prompt: prompt, system: system, maxTokens: 900, history: [])
+        guard let data = extractJSON(from: content),
+              let plan = try? JSONDecoder().decode(ShowMePlan.self, from: data),
+              !plan.steps.isEmpty else {
+            throw QwenError.requestFailed("Could not parse Show Me plan")
+        }
+        return plan
+    }
+
     func chatCompletion(prompt: String, system: String) async throws -> String {
         try await chatCompletionFast(prompt: prompt, system: system, maxTokens: 1200, history: [])
     }

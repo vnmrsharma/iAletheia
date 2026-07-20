@@ -135,21 +135,46 @@ struct ChatView: View {
                 .tint(AppTheme.green)
             }
 
+            if let guide = appState.activeShowMeGuide, let step = guide.currentStep {
+                showMeCoachCard(guide: guide, step: step)
+            }
+
             ThemedChatInput(
                 text: $query,
-                placeholder: "Ask me anything you've been working on…",
+                placeholder: appState.showMeEnabled
+                    ? "Ask how to do something on screen…"
+                    : "Ask me anything you've been working on…",
                 isLoading: appState.isQuerying,
                 onSend: { Task { await submitQuery() } },
                 isFocused: $isInputFocused
             )
 
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 Label("\(appState.memories.count) memories", systemImage: "tray.full")
                     .foregroundStyle(AppTheme.blue)
-                if appState.webSearchEnabled {
+
+                Button {
+                    appState.webSearchEnabled.toggle()
+                } label: {
                     Label("Web", systemImage: "globe")
-                        .foregroundStyle(AppTheme.textSecondary)
+                        .foregroundStyle(appState.webSearchEnabled ? AppTheme.blue : AppTheme.textTertiary)
                 }
+                .buttonStyle(.plain)
+                .help("Toggle web search")
+
+                Button {
+                    appState.showMeEnabled.toggle()
+                    if !appState.showMeEnabled {
+                        appState.endShowMeGuide(announce: false)
+                        ShowMeOverlayController.shared.hide()
+                    }
+                } label: {
+                    Label("Show Me", systemImage: "hand.point.up.left")
+                        .foregroundStyle(appState.showMeEnabled ? AppTheme.blue : AppTheme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Guide you on screen step by step (does not click for you)")
+
                 Spacer()
                 StatusBadge(text: appState.qwenConfigured ? "Qwen connected" : "Local only", active: appState.qwenConfigured)
             }
@@ -157,6 +182,56 @@ struct ChatView: View {
         }
         .padding(compact ? 16 : 24)
         .background(AppTheme.surfaceMuted.opacity(0.6))
+    }
+
+    private func showMeCoachCard(guide: ShowMeGuideSession, step: ShowMeResolvedStep) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Show Me · \(guide.progressLabel)", systemImage: "hand.point.up.left.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppTheme.blue)
+                Spacer()
+                Button("End") {
+                    appState.endShowMeGuide()
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(AppTheme.textSecondary)
+                .buttonStyle(.plain)
+            }
+            Text(step.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppTheme.textPrimary)
+            Text(step.instruction)
+                .font(.caption)
+                .foregroundStyle(AppTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button {
+                    appState.advanceShowMeStep()
+                } label: {
+                    Text(guide.currentIndex + 1 >= guide.steps.count ? "Finish" : "Next step")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(AppTheme.primaryButtonGradient, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+
+                Text("Do this on screen, then tap Next.")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(AppTheme.blueLight)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(AppTheme.blue.opacity(0.25), lineWidth: 1)
+                }
+        )
     }
 
     @ViewBuilder

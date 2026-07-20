@@ -11,6 +11,8 @@ final class AppState: ObservableObject {
         didSet { AppConfiguration.cloudProcessingEnabled = cloudProcessingEnabled }
     }
     @Published var webSearchEnabled = true
+    @Published var showMeEnabled = false
+    @Published var activeShowMeGuide: ShowMeGuideSession?
     @Published var isSearchingWeb = false
     @Published var queryStatusText = AgentActivityPhase.thinking.displayText
     @Published var agentActivityPhase: AgentActivityPhase = .thinking
@@ -395,6 +397,12 @@ final class AppState: ObservableObject {
         isSearchingWeb = false
         setAgentPhase(.thinking)
         defer { isQuerying = false; isSearchingWeb = false }
+
+        if showMeEnabled {
+            await runShowMeGuide(query: query, sessionID: sessionID)
+            return
+        }
+
         do {
             let deps = try dependencies
             let agentAnswer: AgentAnswer
@@ -450,6 +458,107 @@ final class AppState: ObservableObject {
             let assistantMessage = ChatMessage(role: .assistant, text: fallback, timestamp: Date())
             chatMessages.append(assistantMessage)
             persistChatTurn(sessionID: sessionID, message: assistantMessage)
+        }
+    }
+
+    private func runShowMeGuide(query: String, sessionID: UUID) async {
+        setAgentPhase(.guiding)
+        do {
+            let deps = try dependencies
+            deps.activeApplicationService.rememberUserContextBeforeFocusSteal()
+            setAgentPhase(.readingScreen)
+            let result = try await deps.showMePlanner.plan(query: query)
+            if let screen = result.screenContext, !screen.isEmpty {
+                lastScreenContext = screen
+            }
+
+            let session = ShowMeGuideSession(
+                query: query,
+                intro: result.plan.intro,
+                steps: result.steps
+            )
+            activeShowMeGuide = session
+
+            let introText = AnswerSanitizer.sanitize(
+                """
+                \(result.plan.intro)
+
+                Show Me is on — I'll point on your screen step by step. I won't click for you. Do each step yourself, then tap Next when ready.
+                """
+            )
+            let introMessage = ChatMessage(role: .assistant, text: introText, timestamp: Date())
+            chatMessages.append(introMessage)
+            persistChatTurn(sessionID: sessionID, message: introMessage)
+
+            presentCurrentShowMeStep(appendChat: true, sessionID: sessionID)
+        } catch {
+            lastError = error.localizedDescription
+            let fallback = "I couldn't start Show Me for that. Try again with the window you want visible, or turn Show Me off for a normal answer."
+            let assistantMessage = ChatMessage(role: .assistant, text: fallback, timestamp: Date())
+            chatMessages.append(assistantMessage)
+            persistChatTurn(sessionID: sessionID, message: assistantMessage)
+            endShowMeGuide(announce: false)
+        }
+    }
+
+    func advanceShowMeStep() {
+        guard var guide = activeShowMeGuide, !guide.isComplete else { return }
+        let next = guide.currentIndex + 1
+        if next >= guide.steps.count {
+            completeShowMeGuide()
+            return
+        }
+        guide.currentIndex = next
+        activeShowMeGuide = guide
+        presentCurrentShowMeStep(appendChat: true, sessionID: activeChatSessionID)
+    }
+
+    func completeShowMeGuide() {
+        guard activeShowMeGuide != nil else { return }
+        ShowMeOverlayController.shared.hide()
+        let text = "Nice work — that was the last step. Show Me is done. Ask another question anytime, or leave Show Me on for the next walkthrough."
+        let message = ChatMessage(role: .assistant, text: text, timestamp: Date())
+        chatMessages.append(message)
+        if let sessionID = activeChatSessionID {
+            persistChatTurn(sessionID: sessionID, message: message)
+        }
+        activeShowMeGuide = nil
+    }
+
+    func endShowMeGuide(announce: Bool = true) {
+        ShowMeOverlayController.shared.hide()
+        activeShowMeGuide = nil
+        guard announce else { return }
+        let message = ChatMessage(
+            role: .assistant,
+            text: "Show Me ended. You can turn it back on anytime from the chat footer.",
+            timestamp: Date()
+        )
+        chatMessages.append(message)
+        if let sessionID = activeChatSessionID {
+            persistChatTurn(sessionID: sessionID, message: message)
+        }
+    }
+
+    private func presentCurrentShowMeStep(appendChat: Bool, sessionID: UUID?) {
+        guard let guide = activeShowMeGuide, let step = guide.currentStep else { return }
+        let label = "Step \(guide.progressLabel)"
+        ShowMeOverlayController.shared.show(step: step, stepLabel: label)
+
+        guard appendChat else { return }
+        let text = AnswerSanitizer.sanitize(
+            """
+            \(label): \(step.title)
+
+            \(step.instruction)
+
+            Follow the pointer on your screen, then tap Next when you've done this step.
+            """
+        )
+        let message = ChatMessage(role: .assistant, text: text, timestamp: Date())
+        chatMessages.append(message)
+        if let sessionID {
+            persistChatTurn(sessionID: sessionID, message: message)
         }
     }
 
