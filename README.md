@@ -201,7 +201,7 @@ Alibaba Cloud / Qwen usage is implemented in [`Sources/iAletheia/Qwen/QwenClient
 ## Quick start
 
 ```bash
-git clone <your-repo-url> iAletheia
+git clone https://github.com/vnmrsharma/iAletheia.git
 cd iAletheia
 
 cp .env.local.example .env.local
@@ -227,22 +227,11 @@ swift build -c release
 
 ### Configuration
 
-| Source | Priority |
-|---|---|
-| Keychain (Settings in-app) | Highest |
-| `.env.local` | Next |
-| Environment variables | Fallback |
-
-`.env.local` is **gitignored**. Only commit `.env.local.example` (placeholders).
-
-Example `.env.local`:
-
 ```env
 QWEN_API_KEY=sk-your-dashscope-api-key-here
 QWEN_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 QWEN_TEXT_MODEL=qwen3.7-plus
 ```
-
 ---
 
 ## Project structure
@@ -261,20 +250,12 @@ Sources/iAletheia/
 ├── Storage/        SQLite, repositories, preferences
 └── UI/             Main app, owl widget, chat, inspector
 ```
-
----
-
-## Security notes
-
-- **Do not commit** `.env`, `.env.local`, or real API keys.
-- If a key was ever pasted into chat, screenshots, or a public branch, **rotate it** in the DashScope console.
-- Password managers and sign-in flows are excluded from memory by default; secrets in text are redacted before storage.
-
 ---
 
 ## Hackathon submission
 
 - **Track:** MemoryAgent (Track 1) — [Qwen Cloud Hackathon](https://qwencloud-hackathon.devpost.com/)
+- **Repository:** https://github.com/vnmrsharma/iAletheia
 - **License:** MIT
 - **Architecture diagram:** see [Architecture Diagram](#architecture-diagram) above (frontend ↔ local backend ↔ SQLite ↔ Qwen Cloud)
 - **Alibaba Cloud proof:** Qwen / DashScope via [`QwenClient.swift`](Sources/iAletheia/Qwen/QwenClient.swift)
@@ -283,5 +264,4 @@ Sources/iAletheia/
 ---
 
 ## License
-
 MIT — see [LICENSE](LICENSE).
