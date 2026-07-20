@@ -110,9 +110,11 @@ final class OwlWidgetController: NSObject {
     }
 
     /// Briefly hide the floating panel so live screen capture can OCR the editor underneath.
+    /// Does not change which user window is remembered for capture.
     func withPanelHiddenForCapture<T>(_ work: () async throws -> T) async rethrows -> T {
         let panel = self.panel
         let wasVisible = panel?.isVisible == true
+        let wasKey = panel?.isKeyWindow == true
         if wasVisible {
             panel?.orderOut(nil)
             // Let the compositor update before grabbing pixels.
@@ -121,6 +123,9 @@ final class OwlWidgetController: NSObject {
         defer {
             if wasVisible {
                 panel?.orderFrontRegardless()
+                if wasKey {
+                    panel?.makeKeyAndOrderFront(nil)
+                }
             }
         }
         return try await work()
@@ -136,6 +141,8 @@ final class OwlWidgetController: NSObject {
     }
 
     func openChat() {
+        // Lock onto the window the user was viewing BEFORE chat steals focus / Spaces shuffle.
+        rememberUserWindowForCapture()
         setChatExpanded(true, animated: true)
     }
 
@@ -157,14 +164,25 @@ final class OwlWidgetController: NSObject {
             if expanded { activateForInput() }
             return
         }
+        if expanded {
+            rememberUserWindowForCapture()
+        }
         chatVisible = expanded
         resizePanel(expanded: expanded, animated: animated)
         if expanded { activateForInput() }
     }
 
     func activateForInput() {
+        rememberUserWindowForCapture()
         panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func rememberUserWindowForCapture() {
+        // Prefer AppState's shared service when available.
+        if let deps = try? appState?.dependencies {
+            deps.activeApplicationService.rememberUserContextBeforeFocusSteal()
+        }
     }
 
     // MARK: - Panel sizing (owl + chat as one unit)

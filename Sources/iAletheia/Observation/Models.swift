@@ -91,7 +91,8 @@ struct LiveScreenSnapshot: Equatable {
         lines.append("")
         lines.append("""
         IMPORTANT about visible text:
-        - The window title and URL identify the ACTIVE frontmost window/tab. Trust them over conflicting body text.
+        - The window title and URL identify the window the user was working in (sticky target while chat has focus; may be on another Mission Control Space).
+        - Trust that title/URL over conflicting body text from a different window.
         - Text may come from accessibility APIs and/or OCR of that same window.
         - OCR often misreads characters (especially in code comments). Treat garbled fragments as capture noise, NOT as typos in the user's real file.
         - If body text clearly belongs to a different site than the title/URL (e.g. title is Gmail but body looks like GitHub), ignore the mismatched body and use the title/URL plus any coherent matching content.

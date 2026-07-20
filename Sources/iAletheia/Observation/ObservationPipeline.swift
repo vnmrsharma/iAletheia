@@ -242,6 +242,8 @@ final class ObservationPipeline {
     }
 
     private func captureLiveSnapshotUnobstructed() async -> LiveScreenSnapshot? {
+        // Refresh sticky target once more in case chat already held focus.
+        activeApplicationService.rememberUserContextBeforeFocusSteal()
         guard let context = activeApplicationService.currentContext() else { return nil }
 
         let browser = browserMetadataService.extract(for: context)
