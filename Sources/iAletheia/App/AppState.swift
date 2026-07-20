@@ -13,6 +13,7 @@ final class AppState: ObservableObject {
     @Published var webSearchEnabled = true
     @Published var showMeEnabled = false
     @Published var activeShowMeGuide: ShowMeGuideSession?
+    @Published var showMeStatusText: String?
     @Published var isSearchingWeb = false
     @Published var queryStatusText = AgentActivityPhase.thinking.displayText
     @Published var agentActivityPhase: AgentActivityPhase = .thinking
@@ -55,8 +56,11 @@ final class AppState: ObservableObject {
     private var container: DependencyContainer?
     private var observationTask: Task<Void, Never>?
     private var decayTask: Task<Void, Never>?
+    private var showMeWatchTask: Task<Void, Never>?
     /// Screen context from the last live-screen / follow-up turn in this session.
     private var lastScreenContext: String?
+    private var showMeBaseline: ShowMeActivitySnapshot?
+    private var lastShowMeCorrectionAt: Date?
 
     var dependencies: DependencyContainer {
         get throws {
@@ -483,7 +487,7 @@ final class AppState: ObservableObject {
                 """
                 \(result.plan.intro)
 
-                Show Me is on — I'll point on your screen step by step. I won't click for you. Do each step yourself, then tap Next when ready.
+                Show Me is on — I'll point on your screen. Do each step yourself; I'll advance automatically when I see it done. If you click the wrong thing, I'll suggest a correction.
                 """
             )
             let introMessage = ChatMessage(role: .assistant, text: introText, timestamp: Date())
@@ -514,8 +518,11 @@ final class AppState: ObservableObject {
     }
 
     func completeShowMeGuide() {
+        stopShowMeWatcher()
         guard activeShowMeGuide != nil else { return }
         ShowMeOverlayController.shared.hide()
+        showMeStatusText = nil
+        showMeBaseline = nil
         let text = "Nice work — that was the last step. Show Me is done. Ask another question anytime, or leave Show Me on for the next walkthrough."
         let message = ChatMessage(role: .assistant, text: text, timestamp: Date())
         chatMessages.append(message)
@@ -526,8 +533,11 @@ final class AppState: ObservableObject {
     }
 
     func endShowMeGuide(announce: Bool = true) {
+        stopShowMeWatcher()
         ShowMeOverlayController.shared.hide()
         activeShowMeGuide = nil
+        showMeStatusText = nil
+        showMeBaseline = nil
         guard announce else { return }
         let message = ChatMessage(
             role: .assistant,
@@ -543,7 +553,9 @@ final class AppState: ObservableObject {
     private func presentCurrentShowMeStep(appendChat: Bool, sessionID: UUID?) {
         guard let guide = activeShowMeGuide, let step = guide.currentStep else { return }
         let label = "Step \(guide.progressLabel)"
-        ShowMeOverlayController.shared.show(step: step, stepLabel: label)
+        ShowMeOverlayController.shared.show(step: step, stepLabel: label, correctionMode: false)
+        showMeStatusText = "Watching for your action…"
+        refreshShowMeBaselineAndWatch()
 
         guard appendChat else { return }
         let text = AnswerSanitizer.sanitize(
@@ -552,13 +564,115 @@ final class AppState: ObservableObject {
 
             \(step.instruction)
 
-            Follow the pointer on your screen, then tap Next when you've done this step.
+            Follow the pointer. I'll move on when this step is done — or tap Next if you need to skip ahead.
             """
         )
         let message = ChatMessage(role: .assistant, text: text, timestamp: Date())
         chatMessages.append(message)
         if let sessionID {
             persistChatTurn(sessionID: sessionID, message: message)
+        }
+    }
+
+    private func refreshShowMeBaselineAndWatch() {
+        stopShowMeWatcher()
+        guard let deps = try? dependencies,
+              let context = deps.activeApplicationService.currentContext() else {
+            return
+        }
+        let finder = ShowMeTargetFinder()
+        showMeBaseline = finder.activitySnapshot(pid: context.pid)
+        lastShowMeCorrectionAt = nil
+        startShowMeWatcher()
+    }
+
+    private func startShowMeWatcher() {
+        showMeWatchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(700))
+            while !Task.isCancelled {
+                guard let self, let guide = self.activeShowMeGuide, let step = guide.currentStep else { break }
+                await self.pollShowMeProgress(guide: guide, step: step)
+                try? await Task.sleep(for: .milliseconds(550))
+            }
+        }
+    }
+
+    private func stopShowMeWatcher() {
+        showMeWatchTask?.cancel()
+        showMeWatchTask = nil
+    }
+
+    private func pollShowMeProgress(guide: ShowMeGuideSession, step: ShowMeResolvedStep) async {
+        guard let deps = try? dependencies else { return }
+        guard let context = deps.activeApplicationService.currentContext() else { return }
+
+        let finder = ShowMeTargetFinder()
+
+        if let hit = finder.resolve(hints: step.targetHints, regionHint: nil, context: context) {
+            var updated = guide
+            var updatedStep = step
+            updatedStep.targetPoint = hit.point
+            updatedStep.targetRect = hit.rect
+            if updated.currentIndex < updated.steps.count {
+                updated.steps[updated.currentIndex] = updatedStep
+                activeShowMeGuide = updated
+                ShowMeOverlayController.shared.show(
+                    step: updatedStep,
+                    stepLabel: "Step \(updated.progressLabel)",
+                    correctionMode: false
+                )
+            }
+        }
+
+        let baseline = showMeBaseline ?? finder.activitySnapshot(pid: context.pid)
+        let latest = finder.activitySnapshot(pid: context.pid)
+        let currentStep = activeShowMeGuide?.currentStep ?? step
+        let verdict = finder.evaluateProgress(
+            current: currentStep,
+            allSteps: guide.steps,
+            currentIndex: guide.currentIndex,
+            baseline: baseline,
+            latest: latest
+        )
+
+        switch verdict {
+        case .idle:
+            showMeStatusText = "Watching for your action…"
+        case .stepCompleted:
+            showMeStatusText = "Got it — next step"
+            let message = ChatMessage(
+                role: .assistant,
+                text: "Nice — I saw that. Moving to the next step.",
+                timestamp: Date()
+            )
+            chatMessages.append(message)
+            if let sessionID = activeChatSessionID {
+                persistChatTurn(sessionID: sessionID, message: message)
+            }
+            advanceShowMeStep()
+        case .wrongAction(let correction):
+            if let last = lastShowMeCorrectionAt, Date().timeIntervalSince(last) < 4 {
+                return
+            }
+            lastShowMeCorrectionAt = Date()
+            showMeStatusText = "Hmm — try again"
+            if let current = activeShowMeGuide?.currentStep {
+                ShowMeOverlayController.shared.show(
+                    step: current,
+                    stepLabel: "Correction · Step \(guide.progressLabel)",
+                    correctionMode: true
+                )
+            }
+            let message = ChatMessage(
+                role: .assistant,
+                text: AnswerSanitizer.sanitize("Quick correction: \(correction)"),
+                timestamp: Date()
+            )
+            chatMessages.append(message)
+            if let sessionID = activeChatSessionID {
+                persistChatTurn(sessionID: sessionID, message: message)
+            }
+            showMeBaseline = latest
         }
     }
 

@@ -241,26 +241,28 @@ final class QwenClient: QwenService {
         1) Say which app is active and the window/tab title (and URL if present).
         2) Summarize what the visible content is about with concrete details from the snapshot.
         3) If code is visible: briefly explain what the code is doing.
-        4) If an email/message is visible: name the sender, subject/topic, and key asks in the message.
+        4) If an email/message/chat is visible: name the sender of the OPEN thread (main pane), subject/topic, and key asks. Prefer the open conversation body over other names in a sidebar list.
         5) Never say you only have screen history. Never invent Cursor/Safari/other apps that are not in this snapshot.
         6) Never say OCR failed or that you cannot see the screen unless the snapshot truly has no app/window info.
         7) Be specific and concise.
         8) Do NOT invent spelling typos, misspellings, or "visible errors" in comments/strings unless the user explicitly asks you to review for bugs/typos AND the word is clearly wrong in a coherent way (not OCR garbage like random letter soup).
         9) OCR noise is common — never claim a word is misspelled based on a garbled OCR fragment.
         10) Trust the window title and URL as the active tab. If body text conflicts (wrong site), follow the title/URL and any matching content — do not claim the user is on the mismatched site.
+        11) NEVER ask the user to paste, screenshot, or re-send content that is already in the live snapshot. Use the snapshot.
 
         When the user explicitly asks to review code / find errors / bugs:
         - Focus on real logic, API, type, and compile issues.
         - Only mention a spelling typo if it is unambiguous in readable text (not OCR noise).
         - If unsure, say the code looks fine rather than inventing problems.
 
-        When the user asks to draft a reply / respond to an email or message:
-        1) Read the visible email carefully (sender, questions, tone).
+        When the user asks what to reply / draft a response / what to say (email, LinkedIn, Slack, Messages, etc.):
+        1) Identify the active open conversation from the main message pane (not just a sidebar name).
         2) Write a polished reply they can copy-paste and send.
-        3) Put the reply in a clear block after a one-line intro like: Here is a draft you can copy and send.
-        4) Match a professional, friendly tone unless the email suggests otherwise.
-        5) Answer the sender's questions when the user's context is unknown — write sensible placeholders in [brackets] for personal details they must fill in.
+        3) Put the reply after a one-line intro like: Here is a draft you can copy and send.
+        4) Match a professional, friendly tone unless the thread suggests otherwise.
+        5) Use [brackets] only for personal details you truly cannot know.
         6) Do not add markdown bold/italic or asterisks.
+        7) Do not ask them to paste the message — you can already see it.
 
         Use conversation history for follow-ups like "is there any error in this?" — "this" means the screen/content just discussed.
         \(AnswerSanitizer.plainTextStyle)
@@ -273,7 +275,7 @@ final class QwenClient: QwenService {
         LIVE SCREEN SNAPSHOT:
         \(snapshot.contextBlock())
 
-        Answer based on this snapshot and the conversation history. Describe what is actually there. Do not invent typos or unrelated apps. If they asked for a draft reply, produce a ready-to-send draft from the visible email.
+        Answer based on this snapshot and the conversation history. Describe what is actually there. Do not invent typos or unrelated apps. If they asked what to reply or for a draft, produce a ready-to-send reply from the visible open message/thread. Never ask them to paste content that is already in the snapshot.
         """
         let answer = try await chatCompletionFast(prompt: prompt, system: system, maxTokens: 1100, history: history)
         return AssistantResponse(

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Click-through instructor overlay: animated cursor + spotlight. Never clicks for the user.
+/// Click-through instructor overlay: tip of the arrow sits exactly on the target.
 @MainActor
 final class ShowMeOverlayController {
     static let shared = ShowMeOverlayController()
@@ -11,7 +11,7 @@ final class ShowMeOverlayController {
 
     private init() {}
 
-    func show(step: ShowMeResolvedStep, stepLabel: String) {
+    func show(step: ShowMeResolvedStep, stepLabel: String, correctionMode: Bool = false) {
         let point = step.targetPoint ?? fallbackPoint()
         let rect = step.targetRect
         ensurePanel(covering: point)
@@ -19,7 +19,8 @@ final class ShowMeOverlayController {
             point: point,
             highlight: rect,
             title: step.title,
-            subtitle: stepLabel
+            subtitle: stepLabel,
+            correctionMode: correctionMode
         )
         panel?.orderFrontRegardless()
     }
@@ -41,12 +42,13 @@ final class ShowMeOverlayController {
 
         if let panel {
             panel.setFrame(frame, display: true)
+            hosting?.frame = NSRect(origin: .zero, size: frame.size)
             return
         }
 
-        let root = ShowMeOverlayRoot(point: point, highlight: nil, title: "", subtitle: "")
+        let root = ShowMeOverlayRoot(point: point, highlight: nil, title: "", subtitle: "", correctionMode: false)
         let host = NSHostingView(rootView: root)
-        host.frame = frame
+        host.frame = NSRect(origin: .zero, size: frame.size)
 
         let panel = NSPanel(
             contentRect: frame,
@@ -75,23 +77,28 @@ struct ShowMeOverlayRoot: View {
     let highlight: CGRect?
     let title: String
     let subtitle: String
+    var correctionMode: Bool = false
+
+    private var accent: Color { correctionMode ? Color.orange : Color.blue }
 
     var body: some View {
         GeometryReader { geo in
-            let local = cocoaToView(point, in: geo.size, viewFrame: geo.frame(in: .global))
+            let local = cocoaToView(point, in: geo.size)
             ZStack(alignment: .topLeading) {
                 Color.clear
 
                 if let highlight {
                     let r = cocoaRectToView(highlight, in: geo.size)
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.blue.opacity(0.85), lineWidth: 3)
-                        .background(Color.blue.opacity(0.08))
-                        .frame(width: r.width, height: r.height)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(accent.opacity(0.95), lineWidth: 3)
+                        .background(accent.opacity(0.1))
+                        .frame(width: max(r.width, 8), height: max(r.height, 8))
                         .position(x: r.midX, y: r.midY)
                 }
 
-                ShowMeCursorView()
+                // Tip of the pointer is anchored exactly on `local`.
+                ShowMePointerView(accent: accent)
+                    .frame(width: 88, height: 88)
                     .position(local)
 
                 if !title.isEmpty {
@@ -107,9 +114,12 @@ struct ShowMeOverlayRoot: View {
                     .padding(.vertical, 8)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.black.opacity(0.72))
+                            .fill(Color.black.opacity(0.75))
                     )
-                    .position(x: min(max(local.x, 120), geo.size.width - 120), y: max(local.y - 56, 40))
+                    .position(
+                        x: min(max(local.x + 70, 130), geo.size.width - 130),
+                        y: min(max(local.y - 10, 36), geo.size.height - 36)
+                    )
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -118,9 +128,7 @@ struct ShowMeOverlayRoot: View {
         .allowsHitTesting(false)
     }
 
-    /// Convert Cocoa screen point (bottom-left origin) into SwiftUI view coords for a full-screen panel.
-    private func cocoaToView(_ point: CGPoint, in size: CGSize, viewFrame: CGRect) -> CGPoint {
-        // Hosting view fills the screen frame; y is flipped vs Cocoa.
+    private func cocoaToView(_ point: CGPoint, in size: CGSize) -> CGPoint {
         let screen = NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
         let origin = screen?.frame.origin ?? .zero
         let height = screen?.frame.height ?? size.height
@@ -139,26 +147,65 @@ struct ShowMeOverlayRoot: View {
     }
 }
 
-struct ShowMeCursorView: View {
+/// Arrow whose tip sits at the center of this view (the target point).
+struct ShowMePointerView: View {
+    var accent: Color = .blue
     @State private var pulse = false
+    @State private var bob = false
 
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Color.blue.opacity(0.45), lineWidth: 2)
-                .frame(width: pulse ? 72 : 48, height: pulse ? 72 : 48)
-                .animation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true), value: pulse)
+                .stroke(accent.opacity(0.55), lineWidth: 2.5)
+                .frame(width: pulse ? 54 : 34, height: pulse ? 54 : 34)
+                .animation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true), value: pulse)
 
             Circle()
-                .fill(Color.blue.opacity(0.25))
-                .frame(width: 28, height: 28)
+                .fill(accent.opacity(0.22))
+                .frame(width: 16, height: 16)
 
-            Image(systemName: "hand.point.up.left.fill")
-                .font(.system(size: 28))
-                .foregroundStyle(.white, Color.blue)
-                .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
-                .offset(x: 10, y: 10)
+            // Tip at the exact target (center). Offset compensates for tip living in the shape's top-left.
+            ShowMeArrowShape()
+                .fill(Color.white)
+                .overlay {
+                    ShowMeArrowShape()
+                        .stroke(accent, lineWidth: 1.5)
+                }
+                .frame(width: 36, height: 36)
+                .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                .offset(x: 13, y: 13)
+                .offset(x: bob ? 1.5 : 0, y: bob ? 1.5 : 0)
+                .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: bob)
         }
-        .onAppear { pulse = true }
+        .onAppear {
+            pulse = true
+            bob = true
+        }
+    }
+}
+
+/// Triangle tip at (0.15, 0.15) of the unit square — placed so tip ≈ view center when offset.
+struct ShowMeArrowShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        // Tip at top-left-ish of this shape; we position the shape so tip == center of parent ZStack.
+        var path = Path()
+        let tip = CGPoint(x: rect.minX + rect.width * 0.08, y: rect.minY + rect.height * 0.08)
+        let baseA = CGPoint(x: rect.minX + rect.width * 0.72, y: rect.minY + rect.height * 0.28)
+        let baseB = CGPoint(x: rect.minX + rect.width * 0.28, y: rect.minY + rect.height * 0.72)
+        let shaftEnd = CGPoint(x: rect.maxX - 2, y: rect.maxY - 2)
+
+        path.move(to: tip)
+        path.addLine(to: baseA)
+        path.addLine(to: CGPoint(x: tip.x + rect.width * 0.28, y: tip.y + rect.height * 0.28))
+        path.addLine(to: baseB)
+        path.closeSubpath()
+
+        // Shaft
+        path.move(to: CGPoint(x: tip.x + rect.width * 0.22, y: tip.y + rect.height * 0.22))
+        path.addLine(to: shaftEnd)
+        path.addLine(to: CGPoint(x: shaftEnd.x - 6, y: shaftEnd.y))
+        path.addLine(to: CGPoint(x: tip.x + rect.width * 0.3, y: tip.y + rect.height * 0.34))
+        path.closeSubpath()
+        return path
     }
 }

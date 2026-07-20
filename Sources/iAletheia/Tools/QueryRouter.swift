@@ -126,7 +126,8 @@ final class QueryRouter {
 
         CRITICAL rules:
         - Greetings ("hey", "hi", "hello") → direct. Never memory or web.
-        - "Can you see my screen", typos of screen, "what's on my screen", "draft a reply to this email" → live_screen. Never memory.
+        - "Can you see my screen", typos of screen, "what's on my screen", "draft a reply to this email", "what should I reply here" → live_screen. Never memory.
+        - Questions with here/this about replying, messaging, or what's visible → live_screen. Do not ask the user to paste.
         - Historical date/day questions ("what day was Sep 22 2021") → direct. Never web.
         - Math, definitions, explanations → direct unless user says "what did I read about X"
         - "What was I working on", "what did I read", "yesterday I" → memory
@@ -421,6 +422,9 @@ final class QueryRouter {
     /// Actions that require the current window contents (draft reply, summarize this email, etc.).
     static func isOnScreenActionQuery(_ query: String) -> Bool {
         let lower = query.lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
         let actionSignals = [
             "draft a reply", "draft reply", "write a reply", "write reply",
             "reply to this", "reply for this", "respond to this",
@@ -434,14 +438,35 @@ final class QueryRouter {
             "copy paste", "copy-paste", "so i can send", "so i can paste",
             "what's on this page", "what is on this page", "summarize this page",
             "summarize this", "summarise this", "explain this page",
-            "what am i reading", "read this email", "read this message"
+            "what am i reading", "read this email", "read this message",
+            // Deictic reply / messaging help — must use live screen without "look at my screen"
+            "what should i reply", "what should i say", "what do i reply", "what do i say",
+            "how should i reply", "how should i respond", "how do i reply", "how do i respond",
+            "what to reply", "what to say", "what can i reply", "what can i say",
+            "suggest a reply", "suggest a response", "good reply", "good response",
+            "reply here", "respond here", "say here", "answer here",
+            "should i reply", "write a response", "write back",
+            "what should i respond", "help me write back",
+            "answer this message", "answer this chat", "reply to him", "reply to her",
+            "what does this say", "what's this about", "what is this about"
         ]
         if actionSignals.contains(where: { lower.contains($0) }) { return true }
 
-        // "draft … email/reply/response" with deictic this/that
+        // "draft/write … reply/email/response"
         let wantsDraft = lower.contains("draft") || lower.contains("write a") || lower.contains("compose")
         let aboutMail = lower.contains("email") || lower.contains("reply") || lower.contains("response") || lower.contains("message")
         if wantsDraft && aboutMail { return true }
+
+        // "here" / "this" + communicative intent (e.g. "what should i reply here")
+        let deictic = lower.contains(" here") || lower.hasSuffix(" here") || lower.contains("here?")
+            || lower.contains(" this") || lower.contains("this?")
+            || lower.contains("that message") || lower.contains("this chat")
+            || lower.contains("this dm") || lower.contains("this thread")
+            || lower.contains("this conversation") || lower.contains("this linkedin")
+        let communicative = lower.contains("reply") || lower.contains("respond") || lower.contains("response")
+            || lower.contains("answer")
+            || (lower.contains("say") && (lower.contains("what") || lower.contains("should") || lower.contains("how")))
+        if deictic && communicative { return true }
 
         return false
     }

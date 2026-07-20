@@ -218,7 +218,7 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
 
-                Text("Do this on screen, then tap Next.")
+                Text(appState.showMeStatusText ?? "I'll advance when I see this step done.")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.textTertiary)
             }

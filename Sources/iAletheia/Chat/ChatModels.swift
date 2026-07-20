@@ -94,12 +94,13 @@ enum SessionFollowUp {
     static func isFollowUp(_ query: String) -> Bool {
         let lower = query.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let signals = [
-            "this", "that", "it", "these", "those",
+            "this", "that", "it", "these", "those", "here",
             "the code", "the file", "the error", "the bug",
             "any error", "any bugs", "what's wrong", "what is wrong",
             "fix it", "explain it", "review it", "check it",
             "above", "previous", "you said", "you mentioned",
-            "same file", "same screen", "continue"
+            "same file", "same screen", "continue",
+            "reply", "respond", "what should i say"
         ]
         if signals.contains(where: { lower.contains($0) }) { return true }
         // Very short follow-ups
