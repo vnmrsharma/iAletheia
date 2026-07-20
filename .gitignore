@@ -1,0 +1,42 @@
+# macOS / Xcode / SwiftPM
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+xcuserdata/
+
+# Local databases & runtime data
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Secrets & local env (never commit)
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+*.pem
+*.p12
+*.key
+credentials.json
+secrets.json
+**/Secrets.xcconfig
+
+# Logs & temp
+*.log
+*.tmp
+.idea/
+.vscode/
+*.swp
+*~
+
+# Archives / dumps
+*.zip
+*.tar.gz
+*.dSYM.zip
