@@ -177,7 +177,8 @@ final class ActiveApplicationService {
                   app.activationPolicy == .regular else { continue }
 
             let windowID = (info[kCGWindowNumber as String] as? UInt32).map { CGWindowID($0) }
-            let bounds = cgRect(from: boundsDict)
+            let quartzBounds = cgRect(from: boundsDict)
+            let bounds = ScreenCoordinates.cocoaRect(fromQuartz: quartzBounds)
             let cgTitle = info[kCGWindowName as String] as? String
             let title = (cgTitle?.isEmpty == false ? cgTitle : nil) ?? windowTitle(for: ownerPID)
             return ActiveApplicationContext(
@@ -226,7 +227,8 @@ final class ActiveApplicationService {
                   width > 160, height > 160 else { continue }
 
             let title = info[kCGWindowName as String] as? String
-            return (CGWindowID(windowNumber), title, cgRect(from: boundsDict))
+            let quartz = cgRect(from: boundsDict)
+            return (CGWindowID(windowNumber), title, ScreenCoordinates.cocoaRect(fromQuartz: quartz))
         }
         return nil
     }
@@ -245,8 +247,9 @@ final class ActiveApplicationService {
             guard let windowNumber = info[kCGWindowNumber as String] as? UInt32,
                   CGWindowID(windowNumber) == id else { continue }
             let title = info[kCGWindowName as String] as? String
-            let bounds = (info[kCGWindowBounds as String] as? [String: CGFloat]).map(cgRect(from:))
-            return (title, bounds)
+            let quartz = (info[kCGWindowBounds as String] as? [String: CGFloat]).map(cgRect(from:))
+            let cocoa = quartz.map(ScreenCoordinates.cocoaRect(fromQuartz:))
+            return (title, cocoa)
         }
         return nil
     }

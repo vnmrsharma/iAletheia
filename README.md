@@ -39,29 +39,128 @@ Built for **Track 1: MemoryAgent** — [Global AI Hackathon Series with Qwen Clo
 
 ---
 
-## Architecture
+## Architecture Diagram
+
+System overview for [Track 1: MemoryAgent](https://qwencloud-hackathon.devpost.com/) — how the **frontend**, **local backend**, **database**, and **Qwen Cloud** connect.
+
+<p align="center">
+  <img src="docs/architecture-diagram.png" alt="iAletheia system architecture: Frontend → Local Backend → SQLite → Qwen Cloud" width="900" />
+</p>
+
+```mermaid
+flowchart TB
+    subgraph Frontend["Frontend · SwiftUI macOS"]
+        Owl["Floating Owl Widget"]
+        Main["Main App<br/>Home · Chat · Memories · Settings"]
+        ShowMeUI["Show Me Overlay<br/>pointer + coach card"]
+        ChatUI["Chat UI<br/>sessions · history · feedback"]
+    end
+
+    subgraph Backend["Local Backend · Swift / AppState"]
+        Agent["PersonalAgent<br/>orchestrator"]
+        Router["QueryRouter<br/>direct · memory · live · web · hybrid"]
+        Observe["ObservationPipeline<br/>~2s screen → text"]
+        Capture["Capture<br/>ScreenCaptureKit · AX · Vision OCR"]
+        Privacy["PrivacyFilter + Redaction"]
+        MemorySvc["Memory services<br/>extract · admit · dedupe · decay · entities"]
+        Retrieve["HybridRetriever<br/>FTS5 + on-device vectors"]
+        ShowMe["ShowMePlanner<br/>steps + target finder"]
+        QwenClient["QwenClient<br/>DashScope HTTP client"]
+    end
+
+    subgraph Database["Local Database<br/>~/Library/Application Support/iAletheia/"]
+        SQLite[("SQLite")]
+        Mem["memories + FTS5"]
+        ChatDB["chat_sessions · chat_messages"]
+        Obs["observations metadata"]
+        Vec["VectorStore<br/>Apple NaturalLanguage embeddings"]
+    end
+
+    subgraph QwenCloud["Qwen Cloud · Alibaba DashScope"]
+        ChatAPI["Chat Completions<br/>qwen3.7-plus"]
+        VL["Vision / multimodal<br/>optional live-screen path"]
+        Search["Web Search<br/>enable_search / Responses API"]
+    end
+
+    Owl --> ChatUI
+    Main --> ChatUI
+    ChatUI --> Agent
+    Main --> ShowMe
+    ShowMe --> ShowMeUI
+
+    Agent --> Router
+    Router --> Retrieve
+    Router --> Observe
+    Router --> QwenClient
+    Agent --> QwenClient
+    ShowMe --> QwenClient
+    ShowMe --> Capture
+
+    Observe --> Capture
+    Capture --> Privacy
+    Privacy --> MemorySvc
+    MemorySvc --> SQLite
+    Retrieve --> SQLite
+    Retrieve --> Vec
+    Agent --> ChatDB
+    MemorySvc --> Mem
+    Observe --> Obs
+    Vec --> Mem
+
+    QwenClient -->|"HTTPS · API key"| ChatAPI
+    QwenClient --> VL
+    QwenClient --> Search
+
+    ChatAPI -->|"grounded answer"| Agent
+    Search -->|"citations"| Agent
+    Agent --> ChatUI
+```
+
+### Request path (ask / follow-up)
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│                     macOS (local / edge)                      │
-│                                                              │
-│  ScreenCaptureKit + Accessibility + Vision OCR               │
-│  → frontmost window (multi-display / multi-window safe)      │
-│           ↓                                                  │
-│  Privacy filter + dedup + memory extraction                  │
-│           ↓                                                  │
-│  SQLite + FTS5 + on-device embeddings + chat history         │
-│           ↓                                                  │
-│  Floating owl widget · Main app · Memory Inspector           │
-└──────────────────────────┬───────────────────────────────────┘
-                           │  ask / follow-up
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│                 Personal Agent (Qwen Cloud)                  │
-│  Route → retrieve memories and/or capture live screen        │
-│  → optional DashScope web search → grounded plain-text answer│
-└──────────────────────────────────────────────────────────────┘
+  User (Owl / Main Chat)
+           │
+           ▼
+  PersonalAgent ──► QueryRouter (Qwen-assisted when configured)
+           │
+           ├── memory   → HybridRetriever → SQLite FTS5 + vectors
+           ├── live     → ObservationPipeline → frontmost window text
+           ├── web      → Qwen Cloud web_search
+           └── hybrid   → memory + live and/or web
+           │
+           ▼
+  QwenClient ──HTTPS──► DashScope (Qwen Cloud)
+           │                    qwen3.7-plus · search · optional VL
+           ▼
+  AnswerSanitizer → Chat UI + chat_messages (SQLite)
 ```
+
+### Continuous memory path (background)
+
+```text
+  ScreenCaptureKit + Accessibility + Vision OCR
+           │  frontmost window only; image discarded after OCR
+           ▼
+  PrivacyFilter / Redaction / Exclusions
+           │
+           ▼
+  Memory extraction (+ optional Qwen structuring)
+           │
+           ▼
+  SQLite memories · FTS5 · on-device embeddings
+```
+
+### Component map
+
+| Layer | Components | Role |
+|---|---|---|
+| **Frontend** | SwiftUI Main app, Owl widget, Show Me overlay, Chat History | User interaction; never talks to DashScope directly |
+| **Backend** | `PersonalAgent`, `QueryRouter`, `ObservationPipeline`, `ShowMePlanner` | Orchestration, routing, capture, guidance |
+| **Database** | SQLite + FTS5, `VectorStore`, chat history repos | Persistent memory & sessions on device |
+| **Qwen Cloud** | `QwenClient` → DashScope Compatible / Responses APIs | Reasoning, routing help, web search, optional vision |
+
+Alibaba Cloud / Qwen usage is implemented in [`Sources/iAletheia/Qwen/QwenClient.swift`](Sources/iAletheia/Qwen/QwenClient.swift).
 
 ### Privacy model
 
@@ -175,9 +274,10 @@ Sources/iAletheia/
 
 ## Hackathon submission
 
-- **Track:** MemoryAgent (Track 1)
+- **Track:** MemoryAgent (Track 1) — [Qwen Cloud Hackathon](https://qwencloud-hackathon.devpost.com/)
 - **License:** MIT
-- **Alibaba Cloud proof:** Qwen / DashScope via `QwenClient.swift`
+- **Architecture diagram:** see [Architecture Diagram](#architecture-diagram) above (frontend ↔ local backend ↔ SQLite ↔ Qwen Cloud)
+- **Alibaba Cloud proof:** Qwen / DashScope via [`QwenClient.swift`](Sources/iAletheia/Qwen/QwenClient.swift)
 - **Differentiator:** Local visual memory + live frontmost-window awareness + session chat; not a generic chatbot
 
 ---

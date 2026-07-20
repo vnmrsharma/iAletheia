@@ -120,7 +120,8 @@ final class DependencyContainer {
         showMePlanner = ShowMePlanner(
             qwenClient: qwenClient,
             observationPipeline: observationPipeline,
-            activeApplicationService: activeApplicationService
+            activeApplicationService: activeApplicationService,
+            screenCaptureService: screenCaptureService
         )
     }
 }

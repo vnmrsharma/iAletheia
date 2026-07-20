@@ -70,6 +70,51 @@ final class ScreenCaptureService {
         try await recognizeText(in: image, level: .fast)
     }
 
+    struct OCRTextBox {
+        let text: String
+        /// Normalized Vision box (origin bottom-left of the image).
+        let normalizedBounds: CGRect
+    }
+
+    /// OCR with bounding boxes for Show Me pointing (web UIs like Outlook where AX is coarse).
+    func ocrTextBoxes(from image: CGImage) async throws -> [OCRTextBox] {
+        try await withCheckedThrowingContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                let observations = request.results as? [VNRecognizedTextObservation] ?? []
+                let boxes: [OCRTextBox] = observations.compactMap { obs in
+                    guard let text = obs.topCandidates(1).first?.string,
+                          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                    return OCRTextBox(text: text, normalizedBounds: obs.boundingBox)
+                }
+                continuation.resume(returning: boxes)
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = false
+            request.recognitionLanguages = ["en-US"]
+            request.minimumTextHeight = 0.008
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    /// Map a Vision normalized box (image space) onto a Cocoa window rect.
+    static func screenRect(forNormalizedVisionBox box: CGRect, windowCocoaBounds: CGRect) -> CGRect {
+        CGRect(
+            x: windowCocoaBounds.minX + box.minX * windowCocoaBounds.width,
+            y: windowCocoaBounds.minY + box.minY * windowCocoaBounds.height,
+            width: max(8, box.width * windowCocoaBounds.width),
+            height: max(8, box.height * windowCocoaBounds.height)
+        )
+    }
+
     // MARK: - ScreenCaptureKit
 
     private func captureWindowID(_ windowID: CGWindowID, from content: SCShareableContent) async throws -> CGImage? {
@@ -163,7 +208,9 @@ final class ScreenCaptureService {
         guard let bounds, bounds.width > 1, bounds.height > 1 else {
             return content.displays.first
         }
-        let mid = CGPoint(x: bounds.midX, y: bounds.midY)
+        // Window bounds are Cocoa; CGDisplayBounds is Quartz (top-left origin).
+        let quartzBounds = ScreenCoordinates.quartzRect(fromCocoa: bounds)
+        let mid = CGPoint(x: quartzBounds.midX, y: quartzBounds.midY)
         for display in content.displays {
             let frame = CGDisplayBounds(display.displayID)
             if frame.contains(mid) {
@@ -174,7 +221,7 @@ final class ScreenCaptureService {
         var best: (SCDisplay, CGFloat)?
         for display in content.displays {
             let frame = CGDisplayBounds(display.displayID)
-            let overlap = frame.intersection(bounds)
+            let overlap = frame.intersection(quartzBounds)
             let area = overlap.isNull ? 0 : overlap.width * overlap.height
             if best == nil || area > (best?.1 ?? 0) {
                 best = (display, area)

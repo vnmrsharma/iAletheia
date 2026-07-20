@@ -15,12 +15,14 @@ final class ShowMeOverlayController {
         let point = step.targetPoint ?? fallbackPoint()
         let rect = step.targetRect
         ensurePanel(covering: point)
+        let screenFrame = panel?.frame ?? NSScreen.main?.frame ?? .zero
         hosting?.rootView = ShowMeOverlayRoot(
             point: point,
             highlight: rect,
             title: step.title,
             subtitle: stepLabel,
-            correctionMode: correctionMode
+            correctionMode: correctionMode,
+            screenFrame: screenFrame
         )
         panel?.orderFrontRegardless()
     }
@@ -46,7 +48,14 @@ final class ShowMeOverlayController {
             return
         }
 
-        let root = ShowMeOverlayRoot(point: point, highlight: nil, title: "", subtitle: "", correctionMode: false)
+        let root = ShowMeOverlayRoot(
+            point: point,
+            highlight: nil,
+            title: "",
+            subtitle: "",
+            correctionMode: false,
+            screenFrame: frame
+        )
         let host = NSHostingView(rootView: root)
         host.frame = NSRect(origin: .zero, size: frame.size)
 
@@ -78,17 +87,18 @@ struct ShowMeOverlayRoot: View {
     let title: String
     let subtitle: String
     var correctionMode: Bool = false
+    var screenFrame: CGRect
 
     private var accent: Color { correctionMode ? Color.orange : Color.blue }
 
     var body: some View {
         GeometryReader { geo in
-            let local = cocoaToView(point, in: geo.size)
+            let local = cocoaToView(point)
             ZStack(alignment: .topLeading) {
                 Color.clear
 
                 if let highlight {
-                    let r = cocoaRectToView(highlight, in: geo.size)
+                    let r = cocoaRectToView(highlight)
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(accent.opacity(0.95), lineWidth: 3)
                         .background(accent.opacity(0.1))
@@ -128,22 +138,21 @@ struct ShowMeOverlayRoot: View {
         .allowsHitTesting(false)
     }
 
-    private func cocoaToView(_ point: CGPoint, in size: CGSize) -> CGPoint {
-        let screen = NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
-        let origin = screen?.frame.origin ?? .zero
-        let height = screen?.frame.height ?? size.height
-        let x = point.x - origin.x
-        let y = height - (point.y - origin.y)
-        return CGPoint(x: x, y: y)
+    /// Convert Cocoa screen point → top-left view coords using the overlay panel's screen frame.
+    private func cocoaToView(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: point.x - screenFrame.minX,
+            y: screenFrame.maxY - point.y
+        )
     }
 
-    private func cocoaRectToView(_ rect: CGRect, in size: CGSize) -> CGRect {
-        let screen = NSScreen.screens.first { NSMouseInRect(CGPoint(x: rect.midX, y: rect.midY), $0.frame, false) } ?? NSScreen.main
-        let origin = screen?.frame.origin ?? .zero
-        let height = screen?.frame.height ?? size.height
-        let x = rect.origin.x - origin.x
-        let y = height - (rect.origin.y - origin.y) - rect.height
-        return CGRect(x: x, y: y, width: rect.width, height: rect.height)
+    private func cocoaRectToView(_ rect: CGRect) -> CGRect {
+        CGRect(
+            x: rect.origin.x - screenFrame.minX,
+            y: screenFrame.maxY - rect.origin.y - rect.height,
+            width: rect.width,
+            height: rect.height
+        )
     }
 }
 

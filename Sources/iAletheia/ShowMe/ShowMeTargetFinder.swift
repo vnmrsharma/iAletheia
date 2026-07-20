@@ -20,24 +20,51 @@ enum ShowMeWatchVerdict: Equatable {
     case wrongAction(correction: String)
 }
 
-/// Finds on-screen UI targets via Accessibility so Show Me can point at real controls.
+/// Finds on-screen UI targets via Accessibility + OCR so Show Me can point at real controls.
 final class ShowMeTargetFinder {
+    /// Full resolve for planning: precise AX → OCR → loose AX → region guess.
     func resolve(
         hints: [String],
         regionHint: String?,
+        context: ActiveApplicationContext,
+        captureService: ScreenCaptureService? = nil
+    ) async -> (point: CGPoint, rect: CGRect)? {
+        let normalizedHints = hints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let windowBounds = context.windowBounds ?? fallbackWindowBounds()
+
+        if !normalizedHints.isEmpty,
+           let hit = findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: true) {
+            return hit
+        }
+
+        if !normalizedHints.isEmpty, let captureService,
+           let hit = await findViaOCR(hints: normalizedHints, context: context, captureService: captureService) {
+            return hit
+        }
+
+        if !normalizedHints.isEmpty,
+           let hit = findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: false) {
+            return hit
+        }
+
+        return regionPoint(regionHint: regionHint ?? inferredRegion(from: normalizedHints), in: windowBounds)
+    }
+
+    /// AX-only refresh during watching — never falls back to window center (that jerked the pointer off target).
+    func resolveAXRefresh(
+        hints: [String],
         context: ActiveApplicationContext
     ) -> (point: CGPoint, rect: CGRect)? {
         let normalizedHints = hints
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-
-        if !normalizedHints.isEmpty,
-           let hit = findInAccessibility(pid: context.pid, hints: normalizedHints) {
-            return hit
-        }
-
-        let bounds = context.windowBounds ?? fallbackWindowBounds()
-        return regionPoint(regionHint: regionHint, in: bounds)
+        guard !normalizedHints.isEmpty else { return nil }
+        let windowBounds = context.windowBounds ?? fallbackWindowBounds()
+        return findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: true)
+            ?? findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: false)
     }
 
     /// Capture focused/selected UI labels for auto-advance + correction.
@@ -86,7 +113,6 @@ final class ShowMeTargetFinder {
         let newLabels = latest.all.subtracting(baseline.all)
         let meaningfulNew = newLabels.filter { $0.count >= 2 }
 
-        // Already matching before user acted — wait for a change, unless selection newly matches.
         let currentHints = matchKeys(for: current)
 
         if !meaningfulNew.isEmpty {
@@ -94,19 +120,15 @@ final class ShowMeTargetFinder {
                 return .stepCompleted
             }
 
-            // Jumped ahead to a later step's target.
             for (idx, step) in allSteps.enumerated() where idx > currentIndex {
                 let hints = matchKeys(for: step)
                 if meaningfulNew.contains(where: { matches($0, hints: hints) }) {
-                    // Treat as completing intermediate by doing the later action — still advance current
-                    // only if it's a soft "look at sidebar" style; otherwise correct.
                     if isLooseStep(current) {
                         return .stepCompleted
                     }
                 }
             }
 
-            // Wrong distinct UI choice (file/button name that doesn't match this or next step).
             if let wrong = meaningfulNew.first(where: { label in
                 !matches(label, hints: currentHints)
                     && !allSteps.dropFirst(currentIndex).contains { matches(label, hints: matchKeys(for: $0)) }
@@ -120,7 +142,6 @@ final class ShowMeTargetFinder {
             }
         }
 
-        // Selection set now includes target even if label was already present in tree (common for sidebars).
         let newlySelected = latest.selectedLabels.subtracting(baseline.selectedLabels)
         if newlySelected.contains(where: { matches($0, hints: currentHints) }) {
             return .stepCompleted
@@ -134,42 +155,101 @@ final class ShowMeTargetFinder {
         return .idle
     }
 
+    // MARK: - OCR
+
+    private func findViaOCR(
+        hints: [String],
+        context: ActiveApplicationContext,
+        captureService: ScreenCaptureService
+    ) async -> (point: CGPoint, rect: CGRect)? {
+        guard let image = try? await captureService.captureActiveWindowImage(
+            for: context.pid,
+            windowID: context.windowID,
+            windowBounds: context.windowBounds
+        ) else { return nil }
+
+        guard let boxes = try? await captureService.ocrTextBoxes(from: image), !boxes.isEmpty else {
+            return nil
+        }
+
+        let windowBounds = context.windowBounds ?? fallbackWindowBounds()
+        var best: (score: Int, area: CGFloat, rect: CGRect)?
+
+        for box in boxes {
+            let label = normalizeLabel(box.text)
+            guard !label.isEmpty else { continue }
+            var score = 0
+            for hint in hints {
+                let h = normalizeLabel(hint)
+                guard !h.isEmpty else { continue }
+                if label == h {
+                    score += 20
+                } else if label.hasPrefix(h) || h.hasPrefix(label) {
+                    score += 14
+                } else if label.contains(h) || h.contains(label) {
+                    // Prefer short OCR tokens matching short hints ("Send") over long paragraphs.
+                    let lengthPenalty = max(0, label.count - h.count) / 8
+                    score += max(2, 8 - lengthPenalty)
+                }
+            }
+            guard score > 0 else { continue }
+
+            let screen = ScreenCaptureService.screenRect(
+                forNormalizedVisionBox: box.normalizedBounds,
+                windowCocoaBounds: windowBounds
+            )
+            let area = screen.width * screen.height
+            // Skip huge OCR blobs (whole panels).
+            if area > windowBounds.width * windowBounds.height * 0.12 { continue }
+            if screen.height > 80, screen.width > 220 { continue }
+
+            if best == nil || score > best!.score || (score == best!.score && area < best!.area) {
+                best = (score, area, screen)
+            }
+        }
+
+        guard let best else { return nil }
+        return (pointInRect(best.rect), best.rect)
+    }
+
     // MARK: - AX search
 
-    private func findInAccessibility(pid: pid_t, hints: [String]) -> (point: CGPoint, rect: CGRect)? {
+    private func findInAccessibility(
+        pid: pid_t,
+        hints: [String],
+        windowBounds: CGRect,
+        preciseOnly: Bool
+    ) -> (point: CGPoint, rect: CGRect)? {
         let app = AXUIElementCreateApplication(pid)
         var best: (score: Int, area: CGFloat, rect: CGRect)?
 
         if let focused = optionalAX(app, kAXFocusedWindowAttribute as String) {
-            search(element: focused, hints: hints, depth: 0, best: &best)
+            search(element: focused, hints: hints, depth: 0, windowBounds: windowBounds, preciseOnly: preciseOnly, best: &best)
         }
 
         if best == nil, let windows = copyAttribute(app, kAXWindowsAttribute as String) as? [AXUIElement] {
             for window in windows.prefix(3) {
-                search(element: window, hints: hints, depth: 0, best: &best)
+                search(element: window, hints: hints, depth: 0, windowBounds: windowBounds, preciseOnly: preciseOnly, best: &best)
                 if best != nil { break }
             }
         }
 
         guard let best else { return nil }
-        // Aim slightly inside the top-left of small rows so the tip hits the label, not empty padding.
-        let rect = best.rect
-        let point = CGPoint(
-            x: rect.minX + min(18, max(8, rect.width * 0.12)),
-            y: rect.midY
-        )
-        return (point, rect)
+        return (pointInRect(best.rect), best.rect)
     }
 
     private func search(
         element: AXUIElement,
         hints: [String],
         depth: Int,
+        windowBounds: CGRect,
+        preciseOnly: Bool,
         best: inout (score: Int, area: CGFloat, rect: CGRect)?
     ) {
-        guard depth < 18 else { return }
+        guard depth < 20 else { return }
 
         let labels = elementLabels(element).map { normalizeLabel($0) }
+        let role = normalizeLabel(elementRole(element) ?? "")
         var score = 0
         for hint in hints {
             let h = normalizeLabel(hint)
@@ -184,18 +264,60 @@ final class ShowMeTargetFinder {
 
         if score > 0, let frame = elementFrame(element) {
             let area = frame.width * frame.height
-            // Prefer higher score; on ties prefer smaller (more precise) controls.
-            if best == nil || score > best!.score || (score == best!.score && area < best!.area) {
-                best = (score, area, frame)
+            let windowArea = max(1, windowBounds.width * windowBounds.height)
+            let isControl = ["axbutton", "axmenuitem", "axlink", "axcheckbox", "axradiobutton", "axpopupbutton", "axstatictext", "aximage"]
+                .contains(where: { role.contains($0) || role == $0 })
+            let isHuge = area > windowArea * 0.18
+                || frame.width > windowBounds.width * 0.55
+                || frame.height > windowBounds.height * 0.4
+
+            if preciseOnly {
+                // Web apps often expose one giant WebArea titled with nearby text — reject those.
+                if isHuge && !isControl { score = 0 }
+                if role.contains("axwebarea") || role.contains("axscrollarea") || (role.contains("axgroup") && isHuge) {
+                    score = 0
+                }
+                if isControl { score += 6 }
+                if frame.height <= 48, frame.width <= 280 { score += 4 }
+            } else if isHuge {
+                score = max(0, score - 8)
+            }
+
+            if score > 0 {
+                if best == nil || score > best!.score || (score == best!.score && area < best!.area) {
+                    best = (score, area, frame)
+                }
             }
         }
 
         var children: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
               let childElements = children as? [AXUIElement] else { return }
-        for child in childElements.prefix(70) {
-            search(element: child, hints: hints, depth: depth + 1, best: &best)
+        for child in childElements.prefix(80) {
+            search(
+                element: child,
+                hints: hints,
+                depth: depth + 1,
+                windowBounds: windowBounds,
+                preciseOnly: preciseOnly,
+                best: &best
+            )
         }
+    }
+
+    private func pointInRect(_ rect: CGRect) -> CGPoint {
+        // Center of the control — reliable for buttons like Outlook Send.
+        if rect.width <= 160, rect.height <= 56 {
+            return CGPoint(x: rect.midX, y: rect.midY)
+        }
+        return CGPoint(
+            x: rect.minX + min(22, max(10, rect.width * 0.15)),
+            y: rect.midY
+        )
+    }
+
+    private func elementRole(_ element: AXUIElement) -> String? {
+        copyAttribute(element, kAXRoleAttribute as String) as? String
     }
 
     private func harvestSelectedDeep(_ element: AXUIElement, depth: Int, into selected: inout Set<String>) {
@@ -224,7 +346,6 @@ final class ShowMeTargetFinder {
             }
         }
 
-        // Selected state on the element itself.
         if let selectedFlag = copyAttribute(element, "AXSelected") as? Bool, selectedFlag {
             for label in elementLabels(element) {
                 selected.insert(normalizeLabel(label))
@@ -279,6 +400,17 @@ final class ShowMeTargetFinder {
         return ref
     }
 
+    private func inferredRegion(from hints: [String]) -> String {
+        let joined = hints.map(normalizeLabel).joined(separator: " ")
+        if joined.contains("send") || joined.contains("new mail") || joined.contains("compose") {
+            return "toolbar_left"
+        }
+        if joined.contains("to") || joined.contains("subject") || joined.contains("cc") {
+            return "compose_top"
+        }
+        return "center"
+    }
+
     private func regionPoint(regionHint: String?, in bounds: CGRect) -> (point: CGPoint, rect: CGRect)? {
         guard bounds.width > 10, bounds.height > 10 else { return nil }
         let hint = (regionHint ?? "center").lowercased()
@@ -290,8 +422,25 @@ final class ShowMeTargetFinder {
             point = CGPoint(x: bounds.midX, y: bounds.maxY - 18)
             rect = CGRect(x: bounds.minX, y: bounds.maxY - 36, width: bounds.width, height: 36)
         case "ribbon", "toolbar", "top":
-            point = CGPoint(x: inset.midX, y: bounds.maxY - bounds.height * 0.12)
-            rect = CGRect(x: inset.minX, y: bounds.maxY - bounds.height * 0.2, width: inset.width, height: bounds.height * 0.14)
+            point = CGPoint(x: inset.midX, y: bounds.maxY - bounds.height * 0.08)
+            rect = CGRect(x: inset.minX, y: bounds.maxY - bounds.height * 0.16, width: inset.width, height: bounds.height * 0.12)
+        case "toolbar_left", "top_left", "compose_send":
+            // Outlook / webmail Send sits top-left of the compose pane.
+            point = CGPoint(x: bounds.minX + bounds.width * 0.08, y: bounds.maxY - bounds.height * 0.07)
+            rect = CGRect(
+                x: bounds.minX + bounds.width * 0.02,
+                y: bounds.maxY - bounds.height * 0.12,
+                width: bounds.width * 0.16,
+                height: bounds.height * 0.08
+            )
+        case "compose_top":
+            point = CGPoint(x: bounds.minX + bounds.width * 0.35, y: bounds.maxY - bounds.height * 0.18)
+            rect = CGRect(
+                x: bounds.minX + bounds.width * 0.15,
+                y: bounds.maxY - bounds.height * 0.28,
+                width: bounds.width * 0.55,
+                height: bounds.height * 0.12
+            )
         case "bottom":
             point = CGPoint(x: inset.midX, y: bounds.minY + bounds.height * 0.1)
             rect = CGRect(x: inset.minX, y: bounds.minY, width: inset.width, height: bounds.height * 0.14)
@@ -344,7 +493,6 @@ final class ShowMeTargetFinder {
         if l.count < 3 || l.count > 80 { return false }
         let noise = ["window", "application", "group", "scroll", "text", "image", "button", "toolbar"]
         if noise.contains(where: { l == $0 }) { return false }
-        // File-like or title-case-ish tokens
         if l.contains(".") || l.contains(" ") || l.count >= 4 { return true }
         return false
     }

@@ -608,19 +608,26 @@ final class AppState: ObservableObject {
 
         let finder = ShowMeTargetFinder()
 
-        if let hit = finder.resolve(hints: step.targetHints, regionHint: nil, context: context) {
-            var updated = guide
-            var updatedStep = step
-            updatedStep.targetPoint = hit.point
-            updatedStep.targetRect = hit.rect
-            if updated.currentIndex < updated.steps.count {
-                updated.steps[updated.currentIndex] = updatedStep
-                activeShowMeGuide = updated
-                ShowMeOverlayController.shared.show(
-                    step: updatedStep,
-                    stepLabel: "Step \(updated.progressLabel)",
-                    correctionMode: false
-                )
+        // Only refine with precise AX hits — never region/center fallback (that pulled the pointer into the compose body).
+        if let hit = finder.resolveAXRefresh(hints: step.targetHints, context: context) {
+            let previousArea = (step.targetRect?.width ?? .greatestFiniteMagnitude)
+                * (step.targetRect?.height ?? .greatestFiniteMagnitude)
+            let newArea = hit.rect.width * hit.rect.height
+            let shouldUpdate = step.targetPoint == nil || newArea < previousArea * 0.85 || newArea < 12_000
+            if shouldUpdate {
+                var updated = guide
+                var updatedStep = step
+                updatedStep.targetPoint = hit.point
+                updatedStep.targetRect = hit.rect
+                if updated.currentIndex < updated.steps.count {
+                    updated.steps[updated.currentIndex] = updatedStep
+                    activeShowMeGuide = updated
+                    ShowMeOverlayController.shared.show(
+                        step: updatedStep,
+                        stepLabel: "Step \(updated.progressLabel)",
+                        correctionMode: false
+                    )
+                }
             }
         }
 

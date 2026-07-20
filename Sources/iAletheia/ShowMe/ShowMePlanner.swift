@@ -5,16 +5,19 @@ final class ShowMePlanner {
     private let qwenClient: QwenClient
     private let observationPipeline: ObservationPipeline
     private let activeApplicationService: ActiveApplicationService
+    private let screenCaptureService: ScreenCaptureService
     private let targetFinder = ShowMeTargetFinder()
 
     init(
         qwenClient: QwenClient,
         observationPipeline: ObservationPipeline,
-        activeApplicationService: ActiveApplicationService
+        activeApplicationService: ActiveApplicationService,
+        screenCaptureService: ScreenCaptureService
     ) {
         self.qwenClient = qwenClient
         self.observationPipeline = observationPipeline
         self.activeApplicationService = activeApplicationService
+        self.screenCaptureService = screenCaptureService
     }
 
     @MainActor
@@ -40,27 +43,31 @@ final class ShowMePlanner {
             plan = Self.localFallbackPlan(query: query, appName: context?.applicationName)
         }
 
-        let resolved: [ShowMeResolvedStep] = plan.steps.map { step in
+        var resolved: [ShowMeResolvedStep] = []
+        for step in plan.steps {
             var point: CGPoint?
             var rect: CGRect?
             if let context {
-                if let hit = targetFinder.resolve(
+                if let hit = await targetFinder.resolve(
                     hints: step.targetHints,
                     regionHint: step.regionHint,
-                    context: context
+                    context: context,
+                    captureService: screenCaptureService
                 ) {
                     point = hit.point
                     rect = hit.rect
                 }
             }
-            return ShowMeResolvedStep(
-                id: step.id,
-                title: step.title,
-                instruction: step.instruction,
-                targetHints: step.targetHints,
-                targetPoint: point,
-                targetRect: rect,
-                doneHint: step.doneHint
+            resolved.append(
+                ShowMeResolvedStep(
+                    id: step.id,
+                    title: step.title,
+                    instruction: step.instruction,
+                    targetHints: step.targetHints,
+                    targetPoint: point,
+                    targetRect: rect,
+                    doneHint: step.doneHint
+                )
             )
         }
 
