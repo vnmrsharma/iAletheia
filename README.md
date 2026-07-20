@@ -2,7 +2,7 @@
 
 **iAletheia** (Greek: ἀλήθεια — truth, un-forgetting) is a privacy-first **personal agent for macOS**.
 
-It quietly learns from your screen, builds a private local memory, and answers with what you were actually working on — including **live screen awareness** (see the active window, draft email replies, review code) and **Qwen Cloud** for reasoning and web search.
+It quietly learns from your screen, builds a private local memory, and answers with what you were actually working on — including **live screen awareness** (see the active window, draft email replies, review code), **Show Me** coaching so you learn by doing, and **Qwen Cloud** for reasoning and web search.
 
 Built for **Track 1: MemoryAgent** — [Global AI Hackathon Series with Qwen Cloud](https://qwencloud-hackathon.devpost.com/).
 
@@ -16,12 +16,81 @@ Built for **Track 1: MemoryAgent** — [Global AI Hackathon Series with Qwen Clo
 
 | Capability | What you get |
 |---|---|
-| **Personal memory** | Screen → OCR / Accessibility → local SQLite + FTS5 (screenshots never saved) |
-| **Live screen** | “What’s on my screen?” / “Draft a reply to this email” uses the **frontmost** window |
-| **Show Me** | Step-by-step on-screen instructor (pointer + chat) — guides you, never clicks for you |
-| **Session chat** | Multi-turn awareness in the current chat; full **Chat History** of past sessions |
+| **Personal memory** | Screen → OCR / Accessibility → local SQLite + FTS5 + on-device vectors (screenshots never saved) |
+| **Live screen** | “What’s on my screen?” / draft email replies / review code — uses the **frontmost** window |
+| **Show Me** | Step-by-step on-screen coach (pointer + chat) — you click; it never clicks for you |
+| **Session chat** | Multi-turn awareness now; full **Chat History** of past sessions |
 | **Smart routing** | Direct · memory · live screen · web · hybrid — via Qwen when configured |
-| **Privacy** | Redaction, exclusions, local storage under Application Support |
+| **Privacy** | Redaction, default exclusions, local Application Support storage |
+
+---
+
+## Features
+
+### Memory & learning
+- Continuous observation (~every 2s) of the frontmost window via **ScreenCaptureKit**, **Accessibility**, and **Vision OCR**
+- Text is kept; **screenshots are discarded** after OCR (never persisted)
+- Local **SQLite** store with **FTS5** full-text search and **on-device embeddings** (Apple NaturalLanguage)
+- Hybrid retrieval: keyword + semantic search, with relative time (“yesterday”, “today”, “last week”)
+- Memory types for research, people, projects, decisions, tasks, code, preferences, and more
+- Admission / sensitivity gating, **decay** of stale memories, and **pin** for keepers
+- **Smart entity memory** — merge the same people/topics, split homonyms, consolidate on launch
+- Optional **Qwen structuring** of memories when cloud processing is enabled
+- **Chat learning** — infers how you like answers (concise / detailed / technical) and injects that into prompts
+- **Memories** browser: search, inspect type/confidence/topics, **Pin / Unpin**, **Forget**, **Delete All**
+- **Home**: memory stats, recent items, Pause / Resume learning, **Capture Now**
+
+### Live screen
+- Ask about what’s open *right now* (describe app, summarize thread, draft a reply, review visible code)
+- Targets the **frontmost user window** (multi-display / multi-window safe), not “largest window”
+- Sticky window tracking so opening the owl/chat doesn’t steal the capture target
+- Browser-aware capture (AX + OCR merge) for web apps like Gmail / Outlook
+- Local fallback answers when Qwen is offline or cloud processing is off
+- Follow-ups in the same chat reuse session context and refresh the live snapshot
+
+### Show Me (learn by doing)
+- Toggle **Show Me** in the chat footer — questions become guided walkthroughs instead of plain answers
+- Qwen plans clear steps (local fallback plan if needed)
+- Finds real UI targets with **Accessibility** + **OCR** bounding boxes
+- Click-through overlay: **pointer + highlight** on the control; coach card with progress
+- Auto-advances when you complete a step; gently corrects wrong actions
+- **Next / Finish / End** controls — instructor mode only; **never auto-clicks**
+
+### Chat & sessions
+- Multi-turn chat (recent turns sent to the agent for continuity)
+- Persisted **chat sessions** and messages in SQLite
+- **Chat History**: open, continue, or delete past conversations; **New Chat**
+- Inline **citations** for memory / web sources
+- Live activity phases (Thinking, Retrieving, Searching, Drafting, Guiding…)
+- Footer toggles: **Web** search and **Show Me**; Qwen connected vs Local only badge
+- Compact chat inside the floating owl expand panel
+
+### Smart routing (Qwen-powered)
+- Routes each ask to **direct**, **memory**, **live_screen**, **web**, or **memory + web**
+- Local heuristics first; Qwen JSON classification when configured
+- Web search via **Qwen Cloud / DashScope** (`web_search` / `enable_search`) with citations
+- Works in **local-only** mode with hybrid retrieval when no API key is set
+
+### Privacy & control
+- Redaction of passwords, cards, API keys, and similar secrets before storage
+- Drops sign-in / password-manager / checkout-style windows from learning
+- Default exclusions (e.g. 1Password, Keychain Access, iAletheia itself)
+- Local data under `~/Library/Application Support/iAletheia/`
+- Settings: enable/disable cloud answers via Qwen, enable/disable web search, clear all local data
+- Secrets via **Keychain** (in-app) or `.env.local` (gitignored)
+
+### Agent personality & About Me
+- **About Me**: name, role, org, bio, interests, projects, goals → used in prompts
+- **Agent** preferences: tone (Polite / Direct / Casual / Professional / Encouraging)
+- Response length: Concise / Balanced / Detailed
+- Address by name, emoji preference, custom personality text + live prompt preview
+
+### App shell & UX
+- Full macOS app: **Home**, **Memories**, **Chat**, **Chat History**, **About Me**, **Agent**, **Settings**
+- Floating **owl** widget — drag to screen edges, pulse while observing, click to chat
+- **Menu bar** extra: pause/resume learning, jump to Chat / Memories / Settings, permission hints
+- App stays available after the main window is closed
+- Permission prompts for **Screen Recording** and **Accessibility**
 
 ---
 
@@ -53,7 +122,7 @@ flowchart TB
         Owl["Floating Owl Widget"]
         Main["Main App<br/>Home · Chat · Memories · Settings"]
         ShowMeUI["Show Me Overlay<br/>pointer + coach card"]
-        ChatUI["Chat UI<br/>sessions · history · feedback"]
+        ChatUI["Chat UI<br/>sessions · history"]
     end
 
     subgraph Backend["Local Backend · Swift / AppState"]
@@ -78,7 +147,6 @@ flowchart TB
 
     subgraph QwenCloud["Qwen Cloud · Alibaba DashScope"]
         ChatAPI["Chat Completions<br/>qwen3.7-plus"]
-        VL["Vision / multimodal<br/>optional live-screen path"]
         Search["Web Search<br/>enable_search / Responses API"]
     end
 
@@ -108,7 +176,6 @@ flowchart TB
     Vec --> Mem
 
     QwenClient -->|"HTTPS · API key"| ChatAPI
-    QwenClient --> VL
     QwenClient --> Search
 
     ChatAPI -->|"grounded answer"| Agent
@@ -125,13 +192,13 @@ flowchart TB
   PersonalAgent ──► QueryRouter (Qwen-assisted when configured)
            │
            ├── memory   → HybridRetriever → SQLite FTS5 + vectors
-           ├── live     → ObservationPipeline → frontmost window text
+           ├── live     → ObservationPipeline → frontmost window text (AX + OCR)
            ├── web      → Qwen Cloud web_search
            └── hybrid   → memory + live and/or web
            │
            ▼
   QwenClient ──HTTPS──► DashScope (Qwen Cloud)
-           │                    qwen3.7-plus · search · optional VL
+           │                    qwen3.7-plus · search
            ▼
   AnswerSanitizer → Chat UI + chat_messages (SQLite)
 ```
@@ -158,7 +225,7 @@ flowchart TB
 | **Frontend** | SwiftUI Main app, Owl widget, Show Me overlay, Chat History | User interaction; never talks to DashScope directly |
 | **Backend** | `PersonalAgent`, `QueryRouter`, `ObservationPipeline`, `ShowMePlanner` | Orchestration, routing, capture, guidance |
 | **Database** | SQLite + FTS5, `VectorStore`, chat history repos | Persistent memory & sessions on device |
-| **Qwen Cloud** | `QwenClient` → DashScope Compatible / Responses APIs | Reasoning, routing help, web search, optional vision |
+| **Qwen Cloud** | `QwenClient` → DashScope Compatible / Responses APIs | Reasoning, routing help, web search |
 
 Alibaba Cloud / Qwen usage is implemented in [`Sources/iAletheia/Qwen/QwenClient.swift`](Sources/iAletheia/Qwen/QwenClient.swift).
 
@@ -172,19 +239,6 @@ Alibaba Cloud / Qwen usage is implemented in [`Sources/iAletheia/Qwen/QwenClient
 | Screenshot persistence | **Never** (ephemeral capture only) |
 | Qwen Cloud | Query-time reasoning / search only |
 | Secrets | Keychain and/or `.env.local` (never committed) |
-
----
-
-## Features
-
-- Full macOS app: **Home**, **Memories**, **Chat**, **Chat History**, **About Me**, **Agent**, **Settings**
-- Floating owl widget — open chat anytime; learning continues in the background
-- Live screen actions: describe the active window, draft copy-paste email replies, review visible code
-- Session-aware chat + persisted history of every conversation
-- Smart entity memory (merge same people/topics, learn how you like answers)
-- About Me + Agent personality (tone, length, custom instructions)
-- Auto-observe ~every 2s → text kept, image discarded
-- Pin / forget / clear-all for local data
 
 ---
 
@@ -227,11 +281,22 @@ swift build -c release
 
 ### Configuration
 
+| Source | Priority |
+|---|---|
+| Keychain (Settings in-app) | Highest |
+| `.env.local` | Next |
+| Environment variables | Fallback |
+
+`.env.local` is **gitignored**. Only commit `.env.local.example` (placeholders).
+
+Example `.env.local`:
+
 ```env
 QWEN_API_KEY=sk-your-dashscope-api-key-here
 QWEN_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 QWEN_TEXT_MODEL=qwen3.7-plus
 ```
+
 ---
 
 ## Project structure
@@ -246,10 +311,12 @@ Sources/iAletheia/
 ├── Memory/         Extraction, entities, chat learning
 ├── Retrieval/      Hybrid FTS + vector search
 ├── Tools/          PersonalAgent, QueryRouter, web helpers
+├── ShowMe/         Planner, target finder, overlay coach
 ├── Qwen/           DashScope client, AnswerSanitizer
 ├── Storage/        SQLite, repositories, preferences
 └── UI/             Main app, owl widget, chat, inspector
 ```
+
 ---
 
 ## Hackathon submission
@@ -259,9 +326,10 @@ Sources/iAletheia/
 - **License:** MIT
 - **Architecture diagram:** see [Architecture Diagram](#architecture-diagram) above (frontend ↔ local backend ↔ SQLite ↔ Qwen Cloud)
 - **Alibaba Cloud proof:** Qwen / DashScope via [`QwenClient.swift`](Sources/iAletheia/Qwen/QwenClient.swift)
-- **Differentiator:** Local visual memory + live frontmost-window awareness + session chat; not a generic chatbot
+- **Differentiator:** Local visual memory + live frontmost-window awareness + Show Me coach + session chat; not a generic chatbot
 
 ---
 
 ## License
+
 MIT — see [LICENSE](LICENSE).

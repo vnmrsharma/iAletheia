@@ -950,9 +950,10 @@ final class QwenClient: QwenService {
         }
         Rules:
         - 3 to 6 concrete steps max.
-        - Steps must match the live screen / app when possible (Word ribbon, menus, etc.).
-        - target_hints: visible UI labels to search for (menu items, buttons, tabs).
-        - region_hint one of: menubar, ribbon, top, bottom, left, right, center.
+        - Steps must match the live screen / app when possible (Word ribbon, Outlook toolbar, menus, etc.).
+        - target_hints: exact visible UI labels (prefer full button text like "New message", "Send" — not lone words like "message").
+        - region_hint one of: menubar, ribbon, toolbar, toolbar_left, top, top_left, bottom, left, right, center, compose_top.
+        - For compose/mail actions (New message, Send, Reply) use region_hint "toolbar_left" or "top_left".
         - Never invent unrelated apps. Never say you will click for the user.
         - Plain language. No markdown.
         """

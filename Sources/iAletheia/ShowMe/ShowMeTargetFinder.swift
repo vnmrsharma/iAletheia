@@ -20,6 +20,12 @@ enum ShowMeWatchVerdict: Equatable {
     case wrongAction(correction: String)
 }
 
+private enum ShowMeSearchBand {
+    case full
+    /// Top strip of the window — ribbons, New message, Send, toolbars.
+    case toolbar
+}
+
 /// Finds on-screen UI targets via Accessibility + OCR so Show Me can point at real controls.
 final class ShowMeTargetFinder {
     /// Full resolve for planning: precise AX → OCR → loose AX → region guess.
@@ -34,26 +40,52 @@ final class ShowMeTargetFinder {
             .filter { !$0.isEmpty }
 
         let windowBounds = context.windowBounds ?? fallbackWindowBounds()
+        let toolbarAction = isToolbarAction(normalizedHints, regionHint: regionHint)
+        let primaryBand: ShowMeSearchBand = toolbarAction ? .toolbar : .full
 
+        // 1) Precise AX in the right band (toolbar actions stay in the top strip).
         if !normalizedHints.isEmpty,
-           let hit = findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: true) {
+           let hit = findInAccessibility(
+            pid: context.pid,
+            hints: normalizedHints,
+            windowBounds: windowBounds,
+            preciseOnly: true,
+            band: primaryBand
+           ) {
             return hit
         }
 
+        // 2) OCR — same band preference.
         if !normalizedHints.isEmpty, let captureService,
-           let hit = await findViaOCR(hints: normalizedHints, context: context, captureService: captureService) {
+           let hit = await findViaOCR(
+            hints: normalizedHints,
+            context: context,
+            captureService: captureService,
+            band: primaryBand
+           ) {
             return hit
         }
 
-        if !normalizedHints.isEmpty,
-           let hit = findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: false) {
+        // 3) Broader AX only for non-toolbar steps (list/sidebar targets).
+        if !toolbarAction, !normalizedHints.isEmpty,
+           let hit = findInAccessibility(
+            pid: context.pid,
+            hints: normalizedHints,
+            windowBounds: windowBounds,
+            preciseOnly: false,
+            band: .full
+           ) {
             return hit
         }
 
-        return regionPoint(regionHint: regionHint ?? inferredRegion(from: normalizedHints), in: windowBounds)
+        // 4) Safe region fallback — never "center" for New message / Send.
+        return regionPoint(
+            regionHint: regionHint ?? inferredRegion(from: normalizedHints),
+            in: windowBounds
+        )
     }
 
-    /// AX-only refresh during watching — never falls back to window center (that jerked the pointer off target).
+    /// AX-only refresh during watching — never falls back to window center.
     func resolveAXRefresh(
         hints: [String],
         context: ActiveApplicationContext
@@ -63,11 +95,16 @@ final class ShowMeTargetFinder {
             .filter { !$0.isEmpty }
         guard !normalizedHints.isEmpty else { return nil }
         let windowBounds = context.windowBounds ?? fallbackWindowBounds()
-        return findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: true)
-            ?? findInAccessibility(pid: context.pid, hints: normalizedHints, windowBounds: windowBounds, preciseOnly: false)
+        let band: ShowMeSearchBand = isToolbarAction(normalizedHints, regionHint: nil) ? .toolbar : .full
+        return findInAccessibility(
+            pid: context.pid,
+            hints: normalizedHints,
+            windowBounds: windowBounds,
+            preciseOnly: true,
+            band: band
+        )
     }
 
-    /// Capture focused/selected UI labels for auto-advance + correction.
     func activitySnapshot(pid: pid_t) -> ShowMeActivitySnapshot {
         let app = AXUIElementCreateApplication(pid)
         var selected = Set<String>()
@@ -75,7 +112,7 @@ final class ShowMeTargetFinder {
         var labels = Set<String>()
 
         if let focus = optionalAX(app, kAXFocusedUIElementAttribute as String) {
-            for label in elementLabels(focus) {
+            for label in elementLabels(focus, includeValue: false) {
                 focused.insert(normalizeLabel(label))
                 labels.insert(normalizeLabel(label))
             }
@@ -92,7 +129,7 @@ final class ShowMeTargetFinder {
 
         var title: String?
         if let window = optionalAX(app, kAXFocusedWindowAttribute as String) {
-            title = elementLabels(window).first
+            title = elementLabels(window, includeValue: false).first
         }
 
         return ShowMeActivitySnapshot(
@@ -112,7 +149,6 @@ final class ShowMeTargetFinder {
     ) -> ShowMeWatchVerdict {
         let newLabels = latest.all.subtracting(baseline.all)
         let meaningfulNew = newLabels.filter { $0.count >= 2 }
-
         let currentHints = matchKeys(for: current)
 
         if !meaningfulNew.isEmpty {
@@ -160,7 +196,8 @@ final class ShowMeTargetFinder {
     private func findViaOCR(
         hints: [String],
         context: ActiveApplicationContext,
-        captureService: ScreenCaptureService
+        captureService: ScreenCaptureService,
+        band: ShowMeSearchBand
     ) async -> (point: CGPoint, rect: CGRect)? {
         guard let image = try? await captureService.captureActiveWindowImage(
             for: context.pid,
@@ -176,35 +213,30 @@ final class ShowMeTargetFinder {
         var best: (score: Int, area: CGFloat, rect: CGRect)?
 
         for box in boxes {
-            let label = normalizeLabel(box.text)
-            guard !label.isEmpty else { continue }
-            var score = 0
-            for hint in hints {
-                let h = normalizeLabel(hint)
-                guard !h.isEmpty else { continue }
-                if label == h {
-                    score += 20
-                } else if label.hasPrefix(h) || h.hasPrefix(label) {
-                    score += 14
-                } else if label.contains(h) || h.contains(label) {
-                    // Prefer short OCR tokens matching short hints ("Send") over long paragraphs.
-                    let lengthPenalty = max(0, label.count - h.count) / 8
-                    score += max(2, 8 - lengthPenalty)
-                }
-            }
-            guard score > 0 else { continue }
+            let raw = box.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = normalizeLabel(raw)
+            guard !label.isEmpty, !looksLikeInboxNoise(raw) else { continue }
+
+            let score = hintMatchScore(label: label, hints: hints)
+            guard score >= 12 else { continue } // reject weak "message" substring hits
 
             let screen = ScreenCaptureService.screenRect(
                 forNormalizedVisionBox: box.normalizedBounds,
                 windowCocoaBounds: windowBounds
             )
-            let area = screen.width * screen.height
-            // Skip huge OCR blobs (whole panels).
-            if area > windowBounds.width * windowBounds.height * 0.12 { continue }
-            if screen.height > 80, screen.width > 220 { continue }
+            guard acceptsFrame(screen, windowBounds: windowBounds, band: band, toolbarBias: isToolbarAction(hints, regionHint: nil)) else {
+                continue
+            }
 
-            if best == nil || score > best!.score || (score == best!.score && area < best!.area) {
-                best = (score, area, screen)
+            let area = screen.width * screen.height
+            if area > windowBounds.width * windowBounds.height * 0.08 { continue }
+            if screen.height > 64 { continue }
+
+            var ranked = score
+            ranked += toolbarPositionBonus(frame: screen, windowBounds: windowBounds, hints: hints)
+
+            if best == nil || ranked > best!.score || (ranked == best!.score && area < best!.area) {
+                best = (ranked, area, screen)
             }
         }
 
@@ -218,23 +250,40 @@ final class ShowMeTargetFinder {
         pid: pid_t,
         hints: [String],
         windowBounds: CGRect,
-        preciseOnly: Bool
+        preciseOnly: Bool,
+        band: ShowMeSearchBand
     ) -> (point: CGPoint, rect: CGRect)? {
         let app = AXUIElementCreateApplication(pid)
         var best: (score: Int, area: CGFloat, rect: CGRect)?
 
         if let focused = optionalAX(app, kAXFocusedWindowAttribute as String) {
-            search(element: focused, hints: hints, depth: 0, windowBounds: windowBounds, preciseOnly: preciseOnly, best: &best)
+            search(
+                element: focused,
+                hints: hints,
+                depth: 0,
+                windowBounds: windowBounds,
+                preciseOnly: preciseOnly,
+                band: band,
+                best: &best
+            )
         }
 
         if best == nil, let windows = copyAttribute(app, kAXWindowsAttribute as String) as? [AXUIElement] {
             for window in windows.prefix(3) {
-                search(element: window, hints: hints, depth: 0, windowBounds: windowBounds, preciseOnly: preciseOnly, best: &best)
+                search(
+                    element: window,
+                    hints: hints,
+                    depth: 0,
+                    windowBounds: windowBounds,
+                    preciseOnly: preciseOnly,
+                    band: band,
+                    best: &best
+                )
                 if best != nil { break }
             }
         }
 
-        guard let best else { return nil }
+        guard let best, best.score >= 12 else { return nil }
         return (pointInRect(best.rect), best.rect)
     }
 
@@ -244,46 +293,56 @@ final class ShowMeTargetFinder {
         depth: Int,
         windowBounds: CGRect,
         preciseOnly: Bool,
+        band: ShowMeSearchBand,
         best: inout (score: Int, area: CGFloat, rect: CGRect)?
     ) {
         guard depth < 20 else { return }
 
-        let labels = elementLabels(element).map { normalizeLabel($0) }
         let role = normalizeLabel(elementRole(element) ?? "")
+        // Prefer title/description for buttons; AXValue often holds email list text.
+        let preferValue = role.contains("axtextfield") || role.contains("axtextarea")
+        let labels = elementLabels(element, includeValue: preferValue).map(normalizeLabel)
+
         var score = 0
-        for hint in hints {
-            let h = normalizeLabel(hint)
-            if labels.contains(where: { $0 == h }) {
-                score += 12
-            } else if labels.contains(where: { $0.hasPrefix(h) || h.hasPrefix($0) }) {
-                score += 8
-            } else if labels.contains(where: { $0.contains(h) || h.contains($0) }) {
-                score += 4
-            }
+        for label in labels {
+            score = max(score, hintMatchScore(label: label, hints: hints))
         }
 
         if score > 0, let frame = elementFrame(element) {
             let area = frame.width * frame.height
             let windowArea = max(1, windowBounds.width * windowBounds.height)
-            let isControl = ["axbutton", "axmenuitem", "axlink", "axcheckbox", "axradiobutton", "axpopupbutton", "axstatictext", "aximage"]
-                .contains(where: { role.contains($0) || role == $0 })
-            let isHuge = area > windowArea * 0.18
-                || frame.width > windowBounds.width * 0.55
-                || frame.height > windowBounds.height * 0.4
+            let isButtonLike = ["axbutton", "axmenuitem", "axlink", "axpopupbutton", "axcheckbox", "axradiobutton"]
+                .contains(where: { role.contains($0) })
+            let isHuge = area > windowArea * 0.12
+                || frame.width > windowBounds.width * 0.5
+                || frame.height > windowBounds.height * 0.25
+
+            if !acceptsFrame(
+                frame,
+                windowBounds: windowBounds,
+                band: band,
+                toolbarBias: isToolbarAction(hints, regionHint: nil)
+            ) {
+                score = 0
+            }
 
             if preciseOnly {
-                // Web apps often expose one giant WebArea titled with nearby text — reject those.
-                if isHuge && !isControl { score = 0 }
-                if role.contains("axwebarea") || role.contains("axscrollarea") || (role.contains("axgroup") && isHuge) {
-                    score = 0
+                if isHuge && !isButtonLike { score = 0 }
+                if role.contains("axwebarea") || role.contains("axscrollarea") { score = 0 }
+                if role.contains("axgroup") && isHuge { score = 0 }
+                // List cells / static rows are common false positives for "message".
+                if role.contains("axstatictext") || role.contains("axcell") || role.contains("axrow") {
+                    score = max(0, score - 10)
                 }
-                if isControl { score += 6 }
-                if frame.height <= 48, frame.width <= 280 { score += 4 }
+                if isButtonLike { score += 10 }
+                if frame.height <= 44, frame.width <= 260 { score += 4 }
             } else if isHuge {
                 score = max(0, score - 8)
             }
 
-            if score > 0 {
+            score += toolbarPositionBonus(frame: frame, windowBounds: windowBounds, hints: hints)
+
+            if score >= 12 {
                 if best == nil || score > best!.score || (score == best!.score && area < best!.area) {
                     best = (score, area, frame)
                 }
@@ -300,14 +359,124 @@ final class ShowMeTargetFinder {
                 depth: depth + 1,
                 windowBounds: windowBounds,
                 preciseOnly: preciseOnly,
+                band: band,
                 best: &best
             )
         }
     }
 
+    // MARK: - Matching
+
+    /// Strong phrase match; weak substring hits (e.g. "message" inside an email) score near zero.
+    private func hintMatchScore(label: String, hints: [String]) -> Int {
+        let label = normalizeLabel(label)
+        guard !label.isEmpty, label.count < 80 else { return 0 }
+
+        var best = 0
+        for hint in hints {
+            let h = normalizeLabel(hint)
+            guard !h.isEmpty else { continue }
+
+            if label == h {
+                best = max(best, 30)
+                continue
+            }
+
+            // "New message" vs "New message ▾"
+            if label.hasPrefix(h) || h.hasPrefix(label), min(label.count, h.count) >= max(4, h.count * 2 / 3) {
+                best = max(best, 24)
+                continue
+            }
+
+            let hintWords = h.split(separator: " ").map(String.init).filter { $0.count >= 2 }
+            if hintWords.count >= 2 {
+                let labelWords = Set(label.split(separator: " ").map(String.init))
+                let hitCount = hintWords.filter { labelWords.contains($0) || label.contains($0) }.count
+                if hitCount == hintWords.count {
+                    best = max(best, 22)
+                    continue
+                }
+                // Matching only "message" from "new message" is not enough.
+                if hitCount == 1, let only = hintWords.first(where: { label.contains($0) }),
+                   Self.weakToolbarTokens.contains(only) {
+                    continue
+                }
+            }
+
+            // Single-token hints: require near-exact, short control label.
+            if hintWords.count <= 1, h.count >= 4 {
+                if label == h {
+                    best = max(best, 28)
+                } else if label.hasPrefix(h), label.count <= h.count + 8 {
+                    best = max(best, 18)
+                }
+            }
+        }
+        return best
+    }
+
+    private static let weakToolbarTokens: Set<String> = [
+        "new", "mail", "message", "email", "send", "open", "view", "home", "more", "reply"
+    ]
+
+    private func isToolbarAction(_ hints: [String], regionHint: String?) -> Bool {
+        let joined = (hints + [regionHint ?? ""]).map(normalizeLabel).joined(separator: " ")
+        if joined.contains("toolbar") || joined.contains("ribbon") || joined.contains("top_left") || joined.contains("toolbar_left") {
+            return true
+        }
+        let keys = ["new message", "new mail", "new email", "compose", "send", "reply all", "forward", "capitalize", "bold", "italic"]
+        return keys.contains(where: { joined.contains($0) })
+            || (joined.contains("new") && joined.contains("message"))
+            || (joined.contains("new") && joined.contains("mail"))
+    }
+
+    private func acceptsFrame(
+        _ frame: CGRect,
+        windowBounds: CGRect,
+        band: ShowMeSearchBand,
+        toolbarBias: Bool
+    ) -> Bool {
+        guard frame.width > 4, frame.height > 4 else { return false }
+
+        let topBandMinY = windowBounds.maxY - windowBounds.height * 0.22
+        let inToolbarBand = frame.midY >= topBandMinY
+
+        if band == .toolbar {
+            return inToolbarBand
+        }
+
+        // Even in full search, reject inbox-list-looking cells for toolbar-ish steps.
+        if toolbarBias {
+            let leftList = frame.midX < windowBounds.minX + windowBounds.width * 0.38
+            let belowToolbar = frame.midY < topBandMinY
+            let rowShaped = frame.height >= 36 && frame.height <= 140 && frame.width > 120
+            if leftList && belowToolbar && rowShaped {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func toolbarPositionBonus(frame: CGRect, windowBounds: CGRect, hints: [String]) -> Int {
+        guard isToolbarAction(hints, regionHint: nil) else { return 0 }
+        let topBandMinY = windowBounds.maxY - windowBounds.height * 0.18
+        if frame.midY >= topBandMinY { return 8 }
+        if frame.midY >= windowBounds.maxY - windowBounds.height * 0.28 { return 3 }
+        return -6
+    }
+
+    private func looksLikeInboxNoise(_ text: String) -> Bool {
+        let t = text.lowercased()
+        if t.contains("@") { return true }
+        if t.range(of: #"\d{1,2}:\d{2}"#, options: .regularExpression) != nil { return true }
+        if t.contains("unsubscribe") || t.contains("http://") || t.contains("https://") { return true }
+        // Long subject/preview lines
+        if t.count > 48 { return true }
+        return false
+    }
+
     private func pointInRect(_ rect: CGRect) -> CGPoint {
-        // Center of the control — reliable for buttons like Outlook Send.
-        if rect.width <= 160, rect.height <= 56 {
+        if rect.width <= 200, rect.height <= 56 {
             return CGPoint(x: rect.midX, y: rect.midY)
         }
         return CGPoint(
@@ -337,7 +506,7 @@ final class ShowMeTargetFinder {
             guard let value = copyAttribute(element, attr) else { continue }
             if let elements = value as? [AXUIElement] {
                 for el in elements {
-                    for label in elementLabels(el) {
+                    for label in elementLabels(el, includeValue: false) {
                         selected.insert(normalizeLabel(label))
                     }
                 }
@@ -347,21 +516,23 @@ final class ShowMeTargetFinder {
         }
 
         if let selectedFlag = copyAttribute(element, "AXSelected") as? Bool, selectedFlag {
-            for label in elementLabels(element) {
+            for label in elementLabels(element, includeValue: false) {
                 selected.insert(normalizeLabel(label))
             }
         }
     }
 
-    private func elementLabels(_ element: AXUIElement) -> [String] {
+    private func elementLabels(_ element: AXUIElement, includeValue: Bool) -> [String] {
         var labels: [String] = []
-        let attrs = [
+        var attrs = [
             kAXTitleAttribute as String,
             kAXDescriptionAttribute as String,
-            kAXValueAttribute as String,
             "AXAttributedDescription",
             "AXHelp"
         ]
+        if includeValue {
+            attrs.append(kAXValueAttribute as String)
+        }
         for attr in attrs {
             if let text = copyAttribute(element, attr) as? String,
                !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -402,7 +573,11 @@ final class ShowMeTargetFinder {
 
     private func inferredRegion(from hints: [String]) -> String {
         let joined = hints.map(normalizeLabel).joined(separator: " ")
-        if joined.contains("send") || joined.contains("new mail") || joined.contains("compose") {
+        if joined.contains("new message") || joined.contains("new mail") || joined.contains("compose")
+            || (joined.contains("new") && joined.contains("message")) {
+            return "toolbar_left"
+        }
+        if joined.contains("send") {
             return "toolbar_left"
         }
         if joined.contains("to") || joined.contains("subject") || joined.contains("cc") {
@@ -422,16 +597,16 @@ final class ShowMeTargetFinder {
             point = CGPoint(x: bounds.midX, y: bounds.maxY - 18)
             rect = CGRect(x: bounds.minX, y: bounds.maxY - 36, width: bounds.width, height: 36)
         case "ribbon", "toolbar", "top":
-            point = CGPoint(x: inset.midX, y: bounds.maxY - bounds.height * 0.08)
-            rect = CGRect(x: inset.minX, y: bounds.maxY - bounds.height * 0.16, width: inset.width, height: bounds.height * 0.12)
+            point = CGPoint(x: inset.minX + inset.width * 0.12, y: bounds.maxY - bounds.height * 0.06)
+            rect = CGRect(x: inset.minX, y: bounds.maxY - bounds.height * 0.12, width: inset.width * 0.35, height: bounds.height * 0.1)
         case "toolbar_left", "top_left", "compose_send":
-            // Outlook / webmail Send sits top-left of the compose pane.
-            point = CGPoint(x: bounds.minX + bounds.width * 0.08, y: bounds.maxY - bounds.height * 0.07)
+            // Outlook "New message" / Send — top-left of main content.
+            point = CGPoint(x: bounds.minX + bounds.width * 0.12, y: bounds.maxY - bounds.height * 0.055)
             rect = CGRect(
-                x: bounds.minX + bounds.width * 0.02,
-                y: bounds.maxY - bounds.height * 0.12,
-                width: bounds.width * 0.16,
-                height: bounds.height * 0.08
+                x: bounds.minX + bounds.width * 0.04,
+                y: bounds.maxY - bounds.height * 0.1,
+                width: bounds.width * 0.18,
+                height: bounds.height * 0.07
             )
         case "compose_top":
             point = CGPoint(x: bounds.minX + bounds.width * 0.35, y: bounds.maxY - bounds.height * 0.18)
@@ -470,17 +645,14 @@ final class ShowMeTargetFinder {
         if let done = step.doneHint, !done.isEmpty {
             keys.append(contentsOf: done.split(separator: " ").map { normalizeLabel(String($0)) }.filter { $0.count >= 4 })
         }
-        let titleBits = step.title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { normalizeLabel(String($0)) }.filter { $0.count >= 4 }
-        keys.append(contentsOf: titleBits)
+        // Prefer full title phrases over single weak tokens like "message".
+        let title = normalizeLabel(step.title)
+        if !title.isEmpty { keys.append(title) }
         return Array(Set(keys))
     }
 
     private func matches(_ label: String, hints: [String]) -> Bool {
-        let l = normalizeLabel(label)
-        guard !l.isEmpty else { return false }
-        return hints.contains { h in
-            l == h || l.contains(h) || h.contains(l) || l.hasPrefix(h) || h.hasPrefix(l)
-        }
+        hintMatchScore(label: normalizeLabel(label), hints: hints) >= 18
     }
 
     private func isLooseStep(_ step: ShowMeResolvedStep) -> Bool {
