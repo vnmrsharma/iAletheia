@@ -2,19 +2,19 @@ import Foundation
 
 /// Plans step-by-step on-screen guidance from the live window (instructor mode — does not click for the user).
 final class ShowMePlanner {
-    private let qwenClient: QwenClient
+    private let openAIClient: OpenAIClient
     private let observationPipeline: ObservationPipeline
     private let activeApplicationService: ActiveApplicationService
     private let screenCaptureService: ScreenCaptureService
     private let targetFinder = ShowMeTargetFinder()
 
     init(
-        qwenClient: QwenClient,
+        openAIClient: OpenAIClient,
         observationPipeline: ObservationPipeline,
         activeApplicationService: ActiveApplicationService,
         screenCaptureService: ScreenCaptureService
     ) {
-        self.qwenClient = qwenClient
+        self.openAIClient = openAIClient
         self.observationPipeline = observationPipeline
         self.activeApplicationService = activeApplicationService
         self.screenCaptureService = screenCaptureService
@@ -28,9 +28,9 @@ final class ShowMePlanner {
         let screenBlock = snapshot?.contextBlock()
 
         let plan: ShowMePlan
-        if qwenClient.isConfigured {
+        if openAIClient.isConfigured {
             do {
-                plan = try await qwenClient.generateShowMePlan(
+                plan = try await openAIClient.generateShowMePlan(
                     query: query,
                     snapshot: snapshot,
                     appName: context?.applicationName,

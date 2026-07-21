@@ -9,24 +9,24 @@ struct SettingsView: View {
         Form {
             Section("Observation") {
                 Toggle("Private Mode", isOn: $appState.isPrivateMode)
-                Toggle("Cloud answers via Qwen", isOn: $appState.cloudProcessingEnabled)
+                Toggle("Cloud answers via OpenAI", isOn: $appState.cloudProcessingEnabled)
                 Toggle("Web search for live answers", isOn: $appState.webSearchEnabled)
             }
 
-            Section("Qwen Cloud") {
+            Section("OpenAI") {
                 SecureField("API Key", text: $apiKey)
                 Button("Save API Key") {
                     Task {
                         do {
                             let deps = try appState.dependencies
-                            try deps.qwenClient.saveAPIKey(apiKey)
+                            try deps.openAIClient.saveAPIKey(apiKey)
                             savedMessage = "API key saved to Keychain."
                         } catch {
                             savedMessage = error.localizedDescription
                         }
                     }
                 }
-                Text("Qwen powers personal answers from your memories and optional web search. Memories always stay local.")
+                Text("GPT-5.6 powers answers and native web search. Stored memories remain local; only redacted context needed for an enabled cloud feature is sent.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let savedMessage {
@@ -35,7 +35,7 @@ struct SettingsView: View {
             }
 
             Section("Web Search") {
-                Text("Default: DuckDuckGo (no API key). Optional: set TAVILY_API_KEY or BRAVE_SEARCH_API_KEY in .env.local for richer results.")
+                Text("Uses OpenAI's native web_search tool through the Responses API.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

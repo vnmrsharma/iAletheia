@@ -254,6 +254,13 @@ struct ResponseSource: Codable, Equatable, Identifiable {
     let applicationName: String
 }
 
+struct WebSearchResult: Codable, Equatable, Identifiable {
+    var id: String { url }
+    let title: String
+    let url: String
+    let snippet: String
+}
+
 struct AssistantResponse: Codable, Equatable {
     let answer: String
     let sources: [ResponseSource]
@@ -287,7 +294,7 @@ struct AssistantResponse: Codable, Equatable {
     static func localFallback(query: String, memories: [Memory]) -> AssistantResponse {
         guard !memories.isEmpty else {
             return AssistantResponse(
-                answer: "I don't have a personal memory for that yet, and web search needs Qwen Cloud to be configured. Keep working — I'll learn as you browse and read.",
+                answer: "I don't have a personal memory for that yet, and web search needs OpenAI to be configured. Keep working — I'll learn as you browse and read.",
                 sources: [],
                 usedMemoryIDs: [],
                 confidence: 0.2,
@@ -316,7 +323,7 @@ struct AssistantResponse: Codable, Equatable {
     }
 
     private static func cloudNotice() -> String? {
-        "Generated locally from retrieved memories without Qwen Cloud."
+        "Generated locally from retrieved memories without OpenAI."
     }
 }
 
@@ -336,7 +343,7 @@ struct AdmissionConfig {
     static let preRejectThreshold = 0.35
     static let preWorkingThreshold = 0.55
     static let storeDurableThreshold = 0.68
-    static let storeTemporaryThreshold = 0.48
+    static let storeTemporaryThreshold = 0.35
     static let sensitivityRejectThreshold = 0.80
     static let observationCooldownSeconds: TimeInterval = 20
 }

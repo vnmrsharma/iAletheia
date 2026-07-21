@@ -92,7 +92,7 @@ struct FloatingAssistantView: View {
                 ContentUnavailableView(
                     "Search your local memory",
                     systemImage: "magnifyingglass",
-                    description: Text("iAletheia retrieves memories locally and uses Qwen Cloud only to compose answers.")
+                    description: Text("iAletheia retrieves memories locally and uses OpenAI only for enabled cloud features.")
                 )
             }
 

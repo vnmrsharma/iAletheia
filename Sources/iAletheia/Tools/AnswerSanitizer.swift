@@ -1,6 +1,6 @@
 import Foundation
 
-/// Keeps chat answers clean for plain SwiftUI Text — no markdown chrome.
+/// Keeps chat answers clean for plain SwiftUI Text -- no markdown chrome.
 enum AnswerSanitizer {
     static let plainTextStyle = """
     Formatting rules (strict):
@@ -12,8 +12,6 @@ enum AnswerSanitizer {
 
     static func sanitize(_ text: String) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Strip common markdown emphasis / code fences / headings.
         let patterns: [(String, String)] = [
             (#"```[\s\S]*?```"#, ""),
             (#"`([^`]+)`"#, "$1"),
@@ -36,7 +34,6 @@ enum AnswerSanitizer {
             }
         }
 
-        // Catch leftover lone ** or * used as emphasis markers.
         result = result
             .replacingOccurrences(of: "**", with: "")
             .replacingOccurrences(of: "__", with: "")

@@ -34,8 +34,7 @@ final class DependencyContainer {
     let queryInterpreter: QueryInterpreter
 
     let keychainService: KeychainService
-    let qwenClient: QwenClient
-    let webSearchService: WebSearchService
+    let openAIClient: OpenAIClient
     let personalAgent: PersonalAgent
     let showMePlanner: ShowMePlanner
 
@@ -76,21 +75,19 @@ final class DependencyContainer {
         )
 
         keychainService = KeychainService()
-        qwenClient = QwenClient(keychainService: keychainService)
+        openAIClient = OpenAIClient(keychainService: keychainService)
         smartEntityMemory = SmartEntityMemoryService(
             memoryRepository: memoryRepository,
             memoryLinker: memoryLinker,
-            memoryConsolidator: memoryConsolidator,
-            qwenClient: qwenClient
+            memoryConsolidator: memoryConsolidator
         )
         chatLearningService = ChatLearningService(memoryRepository: memoryRepository)
         chatHistoryRepository = ChatHistoryRepository(database: database)
 
         let memoryExtractionService = MemoryExtractionService(
             localExtractor: memoryExtractor,
-            qwenClient: qwenClient
+            openAIClient: openAIClient
         )
-        webSearchService = WebSearchService()
         observationPipeline = ObservationPipeline(
             activeApplicationService: activeApplicationService,
             accessibilityService: accessibilityService,
@@ -111,14 +108,13 @@ final class DependencyContainer {
             episodeService: episodeService
         )
         personalAgent = PersonalAgent(
-            qwenClient: qwenClient,
-            webSearchService: webSearchService,
+            openAIClient: openAIClient,
             hybridRetriever: hybridRetriever,
             chatLearningService: chatLearningService,
             observationPipeline: observationPipeline
         )
         showMePlanner = ShowMePlanner(
-            qwenClient: qwenClient,
+            openAIClient: openAIClient,
             observationPipeline: observationPipeline,
             activeApplicationService: activeApplicationService,
             screenCaptureService: screenCaptureService

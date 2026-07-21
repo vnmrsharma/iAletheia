@@ -1,335 +1,196 @@
 # iAletheia
 
-**iAletheia** (Greek: ἀλήθεια — truth, un-forgetting) is a privacy-first **personal agent for macOS**.
+iAletheia is a privacy-first personal memory assistant for macOS. It observes the active app with user-granted Accessibility and Screen Recording permissions, turns useful activity into searchable local memories, and answers questions using those memories, the current screen, or live web information.
 
-It quietly learns from your screen, builds a private local memory, and answers with what you were actually working on — including **live screen awareness** (see the active window, draft email replies, review code), **Show Me** coaching so you learn by doing, and **Qwen Cloud** for reasoning and web search.
+Built for [OpenAI Build Week](https://openai.devpost.com/) in the **Apps for Your Life** track with Codex and the GPT-5.6 family.
 
-Built for **Track 1: MemoryAgent** — [Global AI Hackathon Series with Qwen Cloud](https://qwencloud-hackathon.devpost.com/).
+## What it does
 
-<p align="center">
-  <img src="Sources/iAletheia/Resources/AppIcon.png" alt="iAletheia icon" width="128" />
-</p>
+- Captures active-window text through Accessibility, with window-scoped OCR as a fallback.
+- Filters excluded apps, sensitive windows, secrets, payment data, and other sensitive patterns before memory admission.
+- Extracts, scores, deduplicates, links, and consolidates memories locally.
+- Stores observations, memories, episodes, and chat history in local SQLite/FTS5 storage.
+- Retrieves relevant memories with local lexical and vector search.
+- Routes each question to direct, memory, live-screen, web, or memory-and-web handling.
+- Uses GPT-5.6 Sol for user-facing reasoning and GPT-5.6 Luna for bounded background structuring and ambiguous query routing.
+- Uses OpenAI's native Responses API `web_search` tool and returns source citations.
+- Provides a **Show Me** overlay that guides the user through visible UI without clicking for them.
+- Keeps a fully local fallback when cloud processing is disabled or unavailable.
 
----
-
-## Highlights
-
-| Capability | What you get |
-|---|---|
-| **Personal memory** | Screen → OCR / Accessibility → local SQLite + FTS5 + on-device vectors (screenshots never saved) |
-| **Live screen** | “What’s on my screen?” / draft email replies / review code — uses the **frontmost** window |
-| **Show Me** | Step-by-step on-screen coach (pointer + chat) — you click; it never clicks for you |
-| **Session chat** | Multi-turn awareness now; full **Chat History** of past sessions |
-| **Smart routing** | Direct · memory · live screen · web · hybrid — via Qwen when configured |
-| **Privacy** | Redaction, default exclusions, local Application Support storage |
-
----
-
-## Features
-
-### Memory & learning
-- Continuous observation (~every 2s) of the frontmost window via **ScreenCaptureKit**, **Accessibility**, and **Vision OCR**
-- Text is kept; **screenshots are discarded** after OCR (never persisted)
-- Local **SQLite** store with **FTS5** full-text search and **on-device embeddings** (Apple NaturalLanguage)
-- Hybrid retrieval: keyword + semantic search, with relative time (“yesterday”, “today”, “last week”)
-- Memory types for research, people, projects, decisions, tasks, code, preferences, and more
-- Admission / sensitivity gating, **decay** of stale memories, and **pin** for keepers
-- **Smart entity memory** — merge the same people/topics, split homonyms, consolidate on launch
-- Optional **Qwen structuring** of memories when cloud processing is enabled
-- **Chat learning** — infers how you like answers (concise / detailed / technical) and injects that into prompts
-- **Memories** browser: search, inspect type/confidence/topics, **Pin / Unpin**, **Forget**, **Delete All**
-- **Home**: memory stats, recent items, Pause / Resume learning, **Capture Now**
-
-### Live screen
-- Ask about what’s open *right now* (describe app, summarize thread, draft a reply, review visible code)
-- Targets the **frontmost user window** (multi-display / multi-window safe), not “largest window”
-- Sticky window tracking so opening the owl/chat doesn’t steal the capture target
-- Browser-aware capture (AX + OCR merge) for web apps like Gmail / Outlook
-- Local fallback answers when Qwen is offline or cloud processing is off
-- Follow-ups in the same chat reuse session context and refresh the live snapshot
-
-### Show Me (learn by doing)
-- Toggle **Show Me** in the chat footer — questions become guided walkthroughs instead of plain answers
-- Qwen plans clear steps (local fallback plan if needed)
-- Finds real UI targets with **Accessibility** + **OCR** bounding boxes
-- Click-through overlay: **pointer + highlight** on the control; coach card with progress
-- Auto-advances when you complete a step; gently corrects wrong actions
-- **Next / Finish / End** controls — instructor mode only; **never auto-clicks**
-
-### Chat & sessions
-- Multi-turn chat (recent turns sent to the agent for continuity)
-- Persisted **chat sessions** and messages in SQLite
-- **Chat History**: open, continue, or delete past conversations; **New Chat**
-- Inline **citations** for memory / web sources
-- Live activity phases (Thinking, Retrieving, Searching, Drafting, Guiding…)
-- Footer toggles: **Web** search and **Show Me**; Qwen connected vs Local only badge
-- Compact chat inside the floating owl expand panel
-
-### Smart routing (Qwen-powered)
-- Routes each ask to **direct**, **memory**, **live_screen**, **web**, or **memory + web**
-- Local heuristics first; Qwen JSON classification when configured
-- Web search via **Qwen Cloud / DashScope** (`web_search` / `enable_search`) with citations
-- Works in **local-only** mode with hybrid retrieval when no API key is set
-
-### Privacy & control
-- Redaction of passwords, cards, API keys, and similar secrets before storage
-- Drops sign-in / password-manager / checkout-style windows from learning
-- Default exclusions (e.g. 1Password, Keychain Access, iAletheia itself)
-- Local data under `~/Library/Application Support/iAletheia/`
-- Settings: enable/disable cloud answers via Qwen, enable/disable web search, clear all local data
-- Secrets via **Keychain** (in-app) or `.env.local` (gitignored)
-
-### Agent personality & About Me
-- **About Me**: name, role, org, bio, interests, projects, goals → used in prompts
-- **Agent** preferences: tone (Polite / Direct / Casual / Professional / Encouraging)
-- Response length: Concise / Balanced / Detailed
-- Address by name, emoji preference, custom personality text + live prompt preview
-
-### App shell & UX
-- Full macOS app: **Home**, **Memories**, **Chat**, **Chat History**, **About Me**, **Agent**, **Settings**
-- Floating **owl** widget — drag to screen edges, pulse while observing, click to chat
-- **Menu bar** extra: pause/resume learning, jump to Chat / Memories / Settings, permission hints
-- App stays available after the main window is closed
-- Permission prompts for **Screen Recording** and **Accessibility**
-
----
-
-## Demo prompts
-
-| Type | Example |
-|---|---|
-| Live screen | “Can you see my screen?” |
-| Show Me | Toggle **Show Me**, then “Where can I find Capitalize?” |
-| Email assist | “Draft a reply for this email” |
-| Code context | “What am I looking at?” → “Is there any error in this?” |
-| Personal recall | “What was I researching about storage yesterday?” |
-| Live web | “What’s new with Qwen Cloud this month?” |
-| Hybrid | “Compare what I read about HBM with current GPU specs” |
-
----
-
-## Architecture Diagram
-
-System overview for [Track 1: MemoryAgent](https://qwencloud-hackathon.devpost.com/) — how the **frontend**, **local backend**, **database**, and **Qwen Cloud** connect.
-
-<p align="center">
-  <img src="docs/architecture-diagram.png" alt="iAletheia system architecture: Frontend → Local Backend → SQLite → Qwen Cloud" width="900" />
-</p>
+## OpenAI architecture
 
 ```mermaid
-flowchart TB
-    subgraph Frontend["Frontend · SwiftUI macOS"]
-        Owl["Floating Owl Widget"]
-        Main["Main App<br/>Home · Chat · Memories · Settings"]
-        ShowMeUI["Show Me Overlay<br/>pointer + coach card"]
-        ChatUI["Chat UI<br/>sessions · history"]
-    end
+flowchart LR
+    UI["SwiftUI app<br/>Chat · Memory · Show Me"]
+    Capture["Local capture<br/>AX · window OCR"]
+    Privacy["Privacy filter<br/>redaction · exclusions"]
+    Admission["Local admission<br/>value · sensitivity · dedupe"]
+    Storage["Local storage<br/>SQLite · FTS5 · vectors"]
+    Agent["PersonalAgent<br/>local routing first"]
+    API["OpenAI Responses API"]
+    Sol["GPT-5.6 Sol<br/>answers · screen · Show Me"]
+    Luna["GPT-5.6 Luna<br/>routing · memory enrichment"]
+    Web["Native web_search<br/>URL citations"]
 
-    subgraph Backend["Local Backend · Swift / AppState"]
-        Agent["PersonalAgent<br/>orchestrator"]
-        Router["QueryRouter<br/>direct · memory · live · web · hybrid"]
-        Observe["ObservationPipeline<br/>~2s screen → text"]
-        Capture["Capture<br/>ScreenCaptureKit · AX · Vision OCR"]
-        Privacy["PrivacyFilter + Redaction"]
-        MemorySvc["Memory services<br/>extract · admit · dedupe · decay · entities"]
-        Retrieve["HybridRetriever<br/>FTS5 + on-device vectors"]
-        ShowMe["ShowMePlanner<br/>steps + target finder"]
-        QwenClient["QwenClient<br/>DashScope HTTP client"]
-    end
-
-    subgraph Database["Local Database<br/>~/Library/Application Support/iAletheia/"]
-        SQLite[("SQLite")]
-        Mem["memories + FTS5"]
-        ChatDB["chat_sessions · chat_messages"]
-        Obs["observations metadata"]
-        Vec["VectorStore<br/>Apple NaturalLanguage embeddings"]
-    end
-
-    subgraph QwenCloud["Qwen Cloud · Alibaba DashScope"]
-        ChatAPI["Chat Completions<br/>qwen3.7-plus"]
-        Search["Web Search<br/>enable_search / Responses API"]
-    end
-
-    Owl --> ChatUI
-    Main --> ChatUI
-    ChatUI --> Agent
-    Main --> ShowMe
-    ShowMe --> ShowMeUI
-
-    Agent --> Router
-    Router --> Retrieve
-    Router --> Observe
-    Router --> QwenClient
-    Agent --> QwenClient
-    ShowMe --> QwenClient
-    ShowMe --> Capture
-
-    Observe --> Capture
-    Capture --> Privacy
-    Privacy --> MemorySvc
-    MemorySvc --> SQLite
-    Retrieve --> SQLite
-    Retrieve --> Vec
-    Agent --> ChatDB
-    MemorySvc --> Mem
-    Observe --> Obs
-    Vec --> Mem
-
-    QwenClient -->|"HTTPS · API key"| ChatAPI
-    QwenClient --> Search
-
-    ChatAPI -->|"grounded answer"| Agent
-    Search -->|"citations"| Agent
-    Agent --> ChatUI
+    Capture --> Privacy --> Admission --> Storage
+    UI --> Agent
+    Agent --> Storage
+    Agent --> API
+    Admission -. "admitted + cooldown" .-> API
+    API --> Sol
+    API --> Luna
+    API --> Web
+    Agent --> UI
 ```
 
-### Request path (ask / follow-up)
+All OpenAI work goes through [`OpenAIClient.swift`](Sources/iAletheia/OpenAI/OpenAIClient.swift) and `POST /v1/responses`.
 
-```text
-  User (Owl / Main Chat)
-           │
-           ▼
-  PersonalAgent ──► QueryRouter (Qwen-assisted when configured)
-           │
-           ├── memory   → HybridRetriever → SQLite FTS5 + vectors
-           ├── live     → ObservationPipeline → frontmost window text (AX + OCR)
-           ├── web      → Qwen Cloud web_search
-           └── hybrid   → memory + live and/or web
-           │
-           ▼
-  QwenClient ──HTTPS──► DashScope (Qwen Cloud)
-           │                    qwen3.7-plus · search
-           ▼
-  AnswerSanitizer → Chat UI + chat_messages (SQLite)
-```
+### API choices
 
-### Continuous memory path (background)
+| Workload | Model | Reasoning | Output contract |
+|---|---|---:|---|
+| Direct and live-screen answers | `gpt-5.6-sol` | low | Text |
+| Memory-grounded and session answers | `gpt-5.6-sol` | medium | Strict JSON Schema where citations/IDs must be recovered |
+| Native live web answers | `gpt-5.6-sol` | medium | Text plus `url_citation` annotations |
+| Show Me plans | `gpt-5.6-sol` | low | Strict JSON Schema |
+| Ambiguous query routing | `gpt-5.6-luna` | none | Strict JSON Schema |
+| Automatic memory enrichment | `gpt-5.6-luna` | none | Strict JSON Schema |
 
-```text
-  ScreenCaptureKit + Accessibility + Vision OCR
-           │  frontmost window only; image discarded after OCR
-           ▼
-  PrivacyFilter / Redaction / Exclusions
-           │
-           ▼
-  Memory extraction (+ optional Qwen structuring)
-           │
-           ▼
-  SQLite memories · FTS5 · on-device embeddings
-```
+The app deliberately does not use Chat Completions, a third-party search API, remote embeddings, or a vision upload path. Local capture produces redacted text; user-facing reasoning and native search use Responses.
 
-### Component map
+Every request sets:
 
-| Layer | Components | Role |
-|---|---|---|
-| **Frontend** | SwiftUI Main app, Owl widget, Show Me overlay, Chat History | User interaction; never talks to DashScope directly |
-| **Backend** | `PersonalAgent`, `QueryRouter`, `ObservationPipeline`, `ShowMePlanner` | Orchestration, routing, capture, guidance |
-| **Database** | SQLite + FTS5, `VectorStore`, chat history repos | Persistent memory & sessions on device |
-| **Qwen Cloud** | `QwenClient` → DashScope Compatible / Responses APIs | Reasoning, routing help, web search |
+- `store: false`
+- an app-generated stable pseudonymous `safety_identifier`
+- an explicit `reasoning.effort`
+- a bounded `max_output_tokens`
+- low or medium text verbosity
 
-Alibaba Cloud / Qwen usage is implemented in [`Sources/iAletheia/Qwen/QwenClient.swift`](Sources/iAletheia/Qwen/QwenClient.swift).
+Web requests declare `tools: [{ "type": "web_search", "search_context_size": "low" }]`. Structured tasks use `text.format.type = "json_schema"` with `strict: true`.
 
-### Privacy model
+## Cost controls
 
-| Stage | Location |
+Current standard GPT-5.6 text prices per one million tokens are:
+
+| Model | Input | Cached input | Output | Use here |
+|---|---:|---:|---:|---|
+| GPT-5.6 Sol | $5.00 | $0.50 | $30.00 | User-facing reasoning |
+| GPT-5.6 Terra | $2.50 | $0.25 | $15.00 | Optional lower-cost Sol override |
+| GPT-5.6 Luna | $1.00 | $0.10 | $6.00 | Routing and background structuring |
+
+Illustrative standard-processing estimates, before any web-search tool fee:
+
+| Operation | Example tokens | Estimated cost |
+|---|---:|---:|
+| Sol answer | 6,000 input + 600 output | about $0.048 |
+| Sol Show Me plan | 4,000 input + 400 output | about $0.032 |
+| Luna route classification | 500 input + 100 output | about $0.0011 |
+| Luna memory enrichment | 2,000 input + 300 output | about $0.0038 |
+
+Actual reasoning and tool usage can change these figures. Native web search also has a per-tool-call charge, so web search is user-toggleable and is never used for questions that local routing classifies as direct, memory, or live screen.
+
+Automatic memory enrichment is bounded in four ways:
+
+1. Sensitive or low-value observations are rejected locally first.
+2. Only candidates scoring at the durable-memory threshold can trigger automatic enrichment.
+3. Screen text sent for enrichment is capped at 4,000 characters.
+4. Automatic enrichments share a five-minute default cooldown. During eight continuous hours, that caps the path at 96 calls (roughly $0.36 using the example above). An explicit user capture may bypass the cooldown.
+
+To prioritize quality less aggressively, set `OPENAI_REASONING_MODEL=gpt-5.6-terra`; no code change is required.
+
+## Privacy boundary
+
+| Data | Location / behavior |
 |---|---|
-| Screen capture & OCR | Local only |
-| Memory & chat history | Local (`~/Library/Application Support/iAletheia/`) |
-| Embeddings | On-device (Apple NaturalLanguage) |
-| Screenshot persistence | **Never** (ephemeral capture only) |
-| Qwen Cloud | Query-time reasoning / search only |
-| Secrets | Keychain and/or `.env.local` (never committed) |
+| Screenshots | Used transiently for local OCR; not saved or uploaded |
+| Raw active-window text | Filtered and redacted locally |
+| Memories, observations, episodes, chat | Local database |
+| Embeddings and retrieval index | Local |
+| OpenAI API key | macOS Keychain (or `.env.local` for development) |
+| Cloud answer context | Only redacted text needed for an enabled request |
+| Responses application state | Disabled with `store: false` |
 
----
+`store: false` does not by itself promise Zero Data Retention; standard API abuse-monitoring retention and the account's data-control settings still apply. Cloud processing can be disabled in Settings, leaving capture, memory storage, retrieval, and fallback answers local.
 
 ## Requirements
 
-- macOS 14+
+- macOS 14 or newer
 - Xcode 15+ / Swift 5.9+
-- Apple Silicon recommended
-- **Screen Recording** and **Accessibility** permissions
-- A [DashScope / Qwen Cloud](https://www.alibabacloud.com/help/en/model-studio/) API key
+- Screen Recording and Accessibility permissions
+- An OpenAI API organization with access to GPT-5.6 for cloud features
 
----
+OpenAI Build Week's Codex credits and OpenAI API billing are separate. Running this app's GPT/API features uses the API key and billing configured on the OpenAI Platform account.
 
-## Quick start
+## Setup
 
 ```bash
-git clone https://github.com/vnmrsharma/iAletheia.git
-cd iAletheia
-
 cp .env.local.example .env.local
-# Edit .env.local and set QWEN_API_KEY
+```
 
-chmod +x run.sh
+Set at least:
+
+```dotenv
+OPENAI_API_KEY=sk-your-openai-api-key-here
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_REASONING_MODEL=gpt-5.6-sol
+OPENAI_UTILITY_MODEL=gpt-5.6-luna
+OPENAI_MEMORY_ENRICHMENT_COOLDOWN_SECONDS=300
+```
+
+For normal use, paste the API key in **Settings → OpenAI** so it is saved in Keychain. The environment file is intended for local development and is gitignored.
+
+Build and run:
+
+```bash
+swift build
 ./run.sh
 ```
 
-Or manually:
+Run tests:
 
 ```bash
-cp .env.local.example .env.local   # then add your key
-swift build -c release
-.build/release/iAletheia
+swift test --disable-sandbox
 ```
-
-### Permissions
-
-1. Launch the app (menu bar / floating owl)
-2. Grant **Screen Recording** and **Accessibility** for iAletheia
-3. Click the owl to chat
-
-### Configuration
-
-| Source | Priority |
-|---|---|
-| Keychain (Settings in-app) | Highest |
-| `.env.local` | Next |
-| Environment variables | Fallback |
-
-`.env.local` is **gitignored**. Only commit `.env.local.example` (placeholders).
-
-Example `.env.local`:
-
-```env
-QWEN_API_KEY=sk-your-dashscope-api-key-here
-QWEN_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-QWEN_TEXT_MODEL=qwen3.7-plus
-```
-
----
 
 ## Project structure
 
 ```text
 Sources/iAletheia/
-├── App/            AppState, DependencyContainer, entry
-├── Capture/        ScreenCaptureKit, Accessibility, active window
-├── Chat/           Session models + chat history persistence
-├── Privacy/        Filters, redaction, exclusions
-├── Observation/    Live snapshot + observation pipeline
-├── Memory/         Extraction, entities, chat learning
-├── Retrieval/      Hybrid FTS + vector search
-├── Tools/          PersonalAgent, QueryRouter, web helpers
-├── ShowMe/         Planner, target finder, overlay coach
-├── Qwen/           DashScope client, AnswerSanitizer
-├── Storage/        SQLite, repositories, preferences
-└── UI/             Main app, owl widget, chat, inspector
+├── App/          AppState, dependency wiring, environment loading
+├── Capture/      Active app, Accessibility, browser metadata, OCR
+├── Chat/         Chat sessions and persistence
+├── Memory/       Extraction, admission, dedupe, consolidation, linking
+├── Observation/  Pipeline, fingerprints, shared models
+├── OpenAI/       Responses API client, schemas, web citation parser
+├── Privacy/      Exclusions, sensitivity detection, redaction
+├── Retrieval/    Local hybrid retrieval and query expansion
+├── ShowMe/       Plans, target finding, overlay controller
+├── Storage/      SQLite repositories, FTS5, local vectors
+├── Tools/        Personal agent, router, answer sanitization
+└── UI/           SwiftUI app, chat, settings, memory inspector, owl
 ```
 
----
+## OpenAI Build Week and Codex work
 
-## Hackathon submission
+The project was created during the submission period. Codex was used as an engineering collaborator, not only for planning. The Build Week implementation includes:
 
-- **Track:** MemoryAgent (Track 1) — [Qwen Cloud Hackathon](https://qwencloud-hackathon.devpost.com/)
-- **Repository:** https://github.com/vnmrsharma/iAletheia
-- **License:** MIT
-- **Architecture diagram:** see [Architecture Diagram](#architecture-diagram) above (frontend ↔ local backend ↔ SQLite ↔ Qwen Cloud)
-- **Alibaba Cloud proof:** Qwen / DashScope via [`QwenClient.swift`](Sources/iAletheia/Qwen/QwenClient.swift)
-- **Differentiator:** Local visual memory + live frontmost-window awareness + Show Me coach + session chat; not a generic chatbot
+- the full Responses API provider integration;
+- GPT-5.6 Sol/Luna workload partitioning and explicit reasoning settings;
+- strict structured-output schemas for memory extraction, routing, memory answers, and Show Me plans;
+- native web-search annotations and citation parsing;
+- local admission gating and the automatic-enrichment cost ceiling;
+- OpenAI-key privacy redaction and `store: false` request controls;
+- provider migration across dependency injection, settings, chat, live screen, Show Me, tests, and documentation;
+- executable-target test integration and Responses API parser tests.
 
----
+Evidence for the submission can be taken from the dated Git history and the timestamped Codex task that performed and verified this migration. The demo should explicitly show Codex's code contribution, a GPT-5.6-powered answer, a native web-search answer with citations, and the cloud-processing privacy toggle.
+
+## Verification status
+
+- `swift build --disable-sandbox`: passing
+- `swift test --disable-sandbox`: 7 tests passing
+- Live paid API smoke test: intentionally not run without the entrant's API key
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT

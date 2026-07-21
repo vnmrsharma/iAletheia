@@ -37,10 +37,10 @@ struct RouteDecision: Equatable {
 
 /// Classifies queries into: direct LLM answer, personal memory, web search, or hybrid.
 final class QueryRouter {
-    private let qwenClient: QwenClient
+    private let openAIClient: OpenAIClient
 
-    init(qwenClient: QwenClient) {
-        self.qwenClient = qwenClient
+    init(openAIClient: OpenAIClient) {
+        self.openAIClient = openAIClient
     }
 
     func classify(query: String, webSearchEnabled: Bool) async throws -> RouteDecision {
@@ -53,7 +53,7 @@ final class QueryRouter {
             return local
         }
 
-        if qwenClient.isConfigured {
+        if openAIClient.isConfigured {
             if let llm = try await classifyWithLLM(query: trimmed, webSearchEnabled: webSearchEnabled) {
                 return llm
             }
@@ -116,58 +116,7 @@ final class QueryRouter {
     }
 
     private func classifyWithLLM(query: String, webSearchEnabled: Bool) async throws -> RouteDecision? {
-        let prompt = """
-        Classify this user message for a personal AI assistant that has:
-        1) direct — answer from the model alone (greetings, general knowledge, math, historical dates/days, definitions, coding concepts, opinions, creative writing unrelated to what's on screen)
-        2) memory — answer from the user's private PAST screen history (what they previously read, worked on, saw, researched)
-        3) web — needs live internet data (breaking news, today's weather, current prices, scores, releases after 2024, real-time status)
-        4) memory_and_web — explicitly connects user's past activity with current external information
-        5) live_screen — needs the CURRENT visible window RIGHT NOW (see my screen, what's open, draft a reply to this email, summarize this page, review this code on screen)
-
-        CRITICAL rules:
-        - Greetings ("hey", "hi", "hello") → direct. Never memory or web.
-        - "Can you see my screen", typos of screen, "what's on my screen", "draft a reply to this email", "what should I reply here" → live_screen. Never memory.
-        - Questions with here/this about replying, messaging, or what's visible → live_screen. Do not ask the user to paste.
-        - Historical date/day questions ("what day was Sep 22 2021") → direct. Never web.
-        - Math, definitions, explanations → direct unless user says "what did I read about X"
-        - "What was I working on", "what did I read", "yesterday I" → memory
-        - Personal situational/advisory about the user ("am I doing well financially", "should I worry about my account", "how is my…") → memory (use their screen history: emails, bank notices, docs)
-        - Never use direct for questions about the user's personal life when memories could apply.
-        - "Latest news on X", "current price", "weather today" → web (only if web enabled: \(webSearchEnabled))
-        - If web disabled, never return web or memory_and_web — use direct, memory, or live_screen instead.
-
-        Return ONLY JSON:
-        {
-          "route": "direct" | "memory" | "web" | "memory_and_web" | "live_screen",
-          "search_query": "optimized web query or null",
-          "confidence": 0.0,
-          "reason": "short reason"
-        }
-
-        User message: \(query)
-        """
-
-        let content = try await qwenClient.chatCompletion(
-            prompt: prompt,
-            system: "You are a query router. Return valid JSON only. Prefer live_screen whenever the user refers to what is visible now. Be conservative with web — most questions do NOT need it."
-        )
-
-        guard let data = extractJSON(from: content),
-              let payload = try? JSONDecoder().decode(RoutePayload.self, from: data) else {
-            return nil
-        }
-
-        var route = payload.route
-        if !webSearchEnabled && (route == .web || route == .memoryAndWeb) {
-            route = route == .memoryAndWeb ? .memory : .direct
-        }
-
-        return RouteDecision(
-            route: route,
-            searchQuery: payload.searchQuery,
-            confidence: payload.confidence,
-            reason: payload.reason
-        )
+        try await openAIClient.classifyRoute(query: query, webSearchEnabled: webSearchEnabled)
     }
 
     private func matchesGreeting(_ lower: String) -> Bool {
@@ -479,22 +428,4 @@ final class QueryRouter {
         return q.isEmpty ? query : q
     }
 
-    private func extractJSON(from text: String) -> Data? {
-        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") else { return nil }
-        return Data(text[start...end].utf8)
-    }
-}
-
-private struct RoutePayload: Decodable {
-    let route: AnswerRoute
-    let searchQuery: String?
-    let confidence: Double
-    let reason: String
-
-    enum CodingKeys: String, CodingKey {
-        case route
-        case searchQuery = "search_query"
-        case confidence
-        case reason
-    }
 }

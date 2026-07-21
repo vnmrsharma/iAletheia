@@ -17,7 +17,7 @@ enum CitationBuilder {
         let all = allCitations(from: response)
         let referenced = referencedCitationIDs(in: response.answer)
         if !referenced.isEmpty {
-            return all.filter { referenced.contains($0.id) }
+            return all.filter { referenced.contains($0.id) || (response.usedWebSearch && $0.kind == .web) }
         }
         if response.usedWebSearch {
             return all.filter { $0.kind == .web }

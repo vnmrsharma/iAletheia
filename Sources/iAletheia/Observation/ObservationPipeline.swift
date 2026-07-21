@@ -7,6 +7,7 @@ final class ObservationPipeline {
     private let browserMetadataService: BrowserMetadataService
     private let privacyFilter: PrivacyFilter
     private let memoryExtractionService: MemoryExtractionService
+    private let memoryAdmissionEngine: MemoryAdmissionEngine
     private let memoryDeduplicator: MemoryDeduplicator
     private let memoryLinker: MemoryLinker
     private let memoryConsolidator: MemoryConsolidator
@@ -43,6 +44,7 @@ final class ObservationPipeline {
         self.browserMetadataService = browserMetadataService
         self.privacyFilter = privacyFilter
         self.memoryExtractionService = memoryExtractionService
+        self.memoryAdmissionEngine = memoryAdmissionEngine
         self.memoryDeduplicator = memoryDeduplicator
         self.memoryLinker = memoryLinker
         self.memoryConsolidator = memoryConsolidator
@@ -99,6 +101,30 @@ final class ObservationPipeline {
             return nil
         }
 
+        let preliminaryScore = memoryAdmissionEngine.preliminaryScore(
+            attention: 0.8,
+            visibleDuration: event.userInitiated ? 120 : AdmissionConfig.observationCooldownSeconds,
+            interaction: InteractionSignals(keyboardActivity: event.userInitiated),
+            sourceValue: browser.url == nil ? 0.7 : 0.85,
+            changeSignificance: event.changeSignificance,
+            sensitivity: privacy.sensitivityScore
+        )
+        guard preliminaryScore >= AdmissionConfig.preRejectThreshold else {
+            try observationRepository.save(record: ProcessedObservationRecord(
+                id: UUID(),
+                capturedAt: Date(),
+                applicationName: context.applicationName,
+                windowTitle: title,
+                sourceURL: browser.url,
+                redactedText: String(privacy.redactedText.prefix(500)),
+                sensitivityScore: privacy.sensitivityScore,
+                admissionScore: preliminaryScore,
+                decision: "rejected_preliminary"
+            ))
+            fingerprints.markSeen(fingerprint)
+            return nil
+        }
+
         let processed = ProcessedObservation(
             id: UUID(),
             sourceObservationID: UUID(),
@@ -110,21 +136,71 @@ final class ObservationPipeline {
             redactedText: privacy.redactedText,
             sensitivityScore: privacy.sensitivityScore,
             attentionScore: 0.8,
-            preliminaryUtilityScore: 0.9,
+            preliminaryUtilityScore: preliminaryScore,
             cloudProcessingAllowed: privacy.decision == .allow
         )
 
-        let candidates = await memoryExtractionService.extract(from: processed, attentionScore: 0.8)
+        let candidates = memoryExtractionService.extractLocal(from: processed, attentionScore: 0.8)
         guard !candidates.isEmpty else { return nil }
 
         var savedMemoryID: UUID?
-        for candidate in candidates {
+        var resultSummary: String?
+        for localCandidate in candidates {
             let existing = try memoryRepository.fetchAll(limit: 200)
+            let preliminaryDeduplication = memoryDeduplicator.operation(
+                candidate: localCandidate,
+                existing: existing,
+                vectorStore: vectorStore
+            )
+            let initialStoreScore = memoryAdmissionEngine.finalStoreScore(
+                candidate: localCandidate,
+                sensitivity: processed.sensitivityScore,
+                redundancy: preliminaryDeduplication.2
+            )
+            let initialAdmission = memoryAdmissionEngine.decision(
+                for: initialStoreScore,
+                sensitivity: processed.sensitivityScore
+            )
+            guard initialAdmission.0 != nil else {
+                try observationRepository.save(record: ProcessedObservationRecord(
+                    id: processed.id,
+                    capturedAt: processed.capturedAt,
+                    applicationName: processed.applicationName,
+                    windowTitle: processed.title,
+                    sourceURL: processed.url,
+                    redactedText: String(processed.redactedText.prefix(500)),
+                    sensitivityScore: processed.sensitivityScore,
+                    admissionScore: initialStoreScore,
+                    decision: initialAdmission.1
+                ))
+                continue
+            }
+
+            var candidate = localCandidate
+            var cloudProcessed = false
+            if initialStoreScore >= AdmissionConfig.storeDurableThreshold || event.userInitiated {
+                let enrichment = await memoryExtractionService.enrich(
+                    candidate: localCandidate,
+                    from: processed,
+                    userInitiated: event.userInitiated
+                )
+                candidate = enrichment.candidate
+                cloudProcessed = enrichment.cloudProcessed
+            }
+
             let basic = memoryDeduplicator.operation(
                 candidate: candidate,
                 existing: existing,
                 vectorStore: vectorStore
             )
+            let storeScore = memoryAdmissionEngine.finalStoreScore(
+                candidate: candidate,
+                sensitivity: processed.sensitivityScore,
+                redundancy: basic.2
+            )
+            let admission = memoryAdmissionEngine.decision(for: storeScore, sensitivity: processed.sensitivityScore)
+            guard let memoryState = admission.0 else { continue }
+
             let decision = smartEntityMemory.decide(
                 candidate: candidate,
                 observation: processed,
@@ -148,7 +224,7 @@ final class ObservationPipeline {
                     embedding: embedding,
                     now: now
                 )
-                existingMemory.cloudProcessed = processed.cloudProcessingAllowed && AppConfiguration.cloudProcessingEnabled
+                existingMemory.cloudProcessed = existingMemory.cloudProcessed || cloudProcessed
                 memory = existingMemory
             default:
                 memory = Memory(
@@ -172,15 +248,15 @@ final class ObservationPipeline {
                     novelty: 1.0,
                     attention: 0.8,
                     futureUtility: candidate.futureUtility,
-                    memoryState: .durable,
+                    memoryState: memoryState,
                     expiresAt: nil,
                     isPinned: false,
                     isUserCorrected: false,
                     embedding: embedding,
                     relatedMemoryIDs: [],
                     evidenceObservationIDs: [processed.sourceObservationID],
-                    cloudProcessed: processed.cloudProcessingAllowed && AppConfiguration.cloudProcessingEnabled,
-                    admissionReason: decision.isHomonym ? "homonym_entity" : "auto_capture",
+                    cloudProcessed: cloudProcessed,
+                    admissionReason: decision.isHomonym ? "homonym_entity" : admission.1,
                     createdAt: now,
                     updatedAt: now
                 )
@@ -215,6 +291,7 @@ final class ObservationPipeline {
                 topicHint: candidate.topics.first
             )
             savedMemoryID = memory.id
+            resultSummary = candidate.summary
 
             try observationRepository.save(record: ProcessedObservationRecord(
                 id: processed.id,
@@ -224,13 +301,14 @@ final class ObservationPipeline {
                 sourceURL: processed.url,
                 redactedText: String(processed.redactedText.prefix(500)),
                 sensitivityScore: processed.sensitivityScore,
-                admissionScore: 0.9,
+                admissionScore: storeScore,
                 decision: decision.operation == .add ? "stored_new" : "updated_existing"
             ))
         }
 
         fingerprints.markSeen(fingerprint)
-        return ObservationPipelineResult(summary: candidates.first?.summary, memoryID: savedMemoryID)
+        guard savedMemoryID != nil else { return nil }
+        return ObservationPipelineResult(summary: resultSummary, memoryID: savedMemoryID)
     }
 
     /// Fast live read of the active window for "what's on my screen now" queries.

@@ -11,14 +11,14 @@ enum DisplaySanitizer {
     static func safeError(_ text: String?) -> String? {
         guard var value = text?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         value = redactSecrets(in: value)
-        if value.localizedCaseInsensitiveContains("QWEN_API_KEY") { return "Capture failed. Sensitive content was blocked." }
+        if value.localizedCaseInsensitiveContains("OPENAI_API_KEY") { return "Capture failed. Sensitive content was blocked." }
         return String(value.prefix(160))
     }
 
     static func containsSensitiveContent(_ text: String) -> Bool {
         let lower = text.lowercased()
         let markers = [
-            "qwen_api_key", ".env.local", ".env", "sk-", "api_key=", "dashscope",
+            "openai_api_key", ".env.local", ".env", "sk-", "api_key=",
             "secret=", "password:", "private key", "recovery code"
         ]
         return markers.contains { lower.contains($0) }
@@ -27,7 +27,7 @@ enum DisplaySanitizer {
     static func redactSecrets(in text: String) -> String {
         var result = text
         let patterns = [
-            #"QWEN_API_KEY\s*=\s*\S+"#,
+            #"OPENAI_API_KEY\s*=\s*\S+"#,
             #"sk-[A-Za-z0-9._\-]+"#,
             #"Bearer\s+[A-Za-z0-9._\-]+"#
         ]

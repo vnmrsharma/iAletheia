@@ -51,7 +51,7 @@ final class SensitivePatternDetector {
             #"(?i)\b(?:password|otp|one[- ]time|passcode|api[_ -]?key|secret|bearer)\b"#,
             #"(?i)\b(?:seed phrase|recovery code|private key)\b"#,
             #"-----BEGIN [A-Z ]*PRIVATE KEY-----"#,
-            "QWEN_API_KEY\\s*=",
+            "OPENAI_API_KEY\\s*=",
             #"sk-[A-Za-z0-9._\-]{8,}"#
         ]
         return raw.compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
@@ -72,7 +72,7 @@ final class RedactionService {
         var result = text
         let replacements: [(String, String)] = [
             (#"(?i)\b(?:password|otp|passcode|secret|api key)\s*[:=]?\s*\S+"#, "[REDACTED]"),
-            (#"QWEN_API_KEY\s*=\s*\S+"#, "QWEN_API_KEY=[REDACTED]"),
+            (#"OPENAI_API_KEY\s*=\s*\S+"#, "OPENAI_API_KEY=[REDACTED]"),
             (#"sk-[A-Za-z0-9._\-]+"#, "[REDACTED_KEY]"),
             (#"\b(?:\d[ -]*?){13,16}\b"#, "[REDACTED_CARD]"),
             (#"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"#, "[REDACTED_PRIVATE_KEY]")

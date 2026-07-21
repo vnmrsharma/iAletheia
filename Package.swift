@@ -13,6 +13,11 @@ let package = Package(
             path: "Sources/iAletheia",
             exclude: ["Resources/Info.plist"],
             resources: [.process("Resources")]
+        ),
+        .testTarget(
+            name: "iAletheiaTests",
+            dependencies: ["iAletheia"],
+            path: "Tests/iAletheiaTests"
         )
     ]
 )

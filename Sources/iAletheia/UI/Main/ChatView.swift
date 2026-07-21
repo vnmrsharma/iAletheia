@@ -176,7 +176,7 @@ struct ChatView: View {
                 .help("Guide you on screen step by step (does not click for you)")
 
                 Spacer()
-                StatusBadge(text: appState.qwenConfigured ? "Qwen connected" : "Local only", active: appState.qwenConfigured)
+                StatusBadge(text: appState.openAIConfigured ? "OpenAI connected" : "Local only", active: appState.openAIConfigured)
             }
             .font(.caption2)
         }

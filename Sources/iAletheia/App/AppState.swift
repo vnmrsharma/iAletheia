@@ -41,8 +41,8 @@ final class AppState: ObservableObject {
         DisplaySanitizer.safeError(lastError)
     }
 
-    var qwenConfigured: Bool {
-        (try? dependencies.qwenClient.isConfigured) ?? false
+    var openAIConfigured: Bool {
+        (try? dependencies.openAIClient.isConfigured) ?? false
     }
 
     var activeChatSessionTitle: String {
@@ -410,7 +410,7 @@ final class AppState: ObservableObject {
         do {
             let deps = try dependencies
             let agentAnswer: AgentAnswer
-            if cloudProcessingEnabled, deps.qwenClient.isConfigured {
+            if cloudProcessingEnabled, deps.openAIClient.isConfigured {
                 agentAnswer = try await deps.personalAgent.answer(
                     query: query,
                     webSearchEnabled: webSearchEnabled,
@@ -450,7 +450,7 @@ final class AppState: ObservableObject {
             lastError = error.localizedDescription
             let detail = error.localizedDescription
             let fallback = detail.isEmpty
-                ? "I couldn't answer that yet. Try rephrasing, or check your Qwen API connection."
+                ? "I couldn't answer that yet. Try rephrasing, or check your OpenAI API connection."
                 : "Web search failed: \(detail)"
             assistantResponse = AssistantResponse(
                 answer: fallback,
@@ -803,4 +803,18 @@ enum ObservationTriggerEvent {
     case appChanged
     case windowChanged
     case urlChanged
+
+    var userInitiated: Bool {
+        if case .manual(let value) = self { return value }
+        return false
+    }
+
+    var changeSignificance: Double {
+        switch self {
+        case .periodic: return 0.5
+        case .manual: return 1.0
+        case .appChanged, .urlChanged: return 0.95
+        case .windowChanged: return 0.8
+        }
+    }
 }

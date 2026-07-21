@@ -2,33 +2,54 @@ import Foundation
 
 final class MemoryExtractionService {
     private let localExtractor: LocalMemoryExtractor
-    private let qwenClient: QwenClient
+    private let openAIClient: OpenAIClient
+    private let enrichmentLock = NSLock()
+    private var lastAutomaticEnrichmentAt: Date?
 
-    init(localExtractor: LocalMemoryExtractor, qwenClient: QwenClient) {
+    init(localExtractor: LocalMemoryExtractor, openAIClient: OpenAIClient) {
         self.localExtractor = localExtractor
-        self.qwenClient = qwenClient
+        self.openAIClient = openAIClient
     }
 
-    func extract(from processed: ProcessedObservation, attentionScore: Double) async -> [MemoryCandidate] {
-        var candidates = localExtractor.extract(from: processed, attentionScore: attentionScore)
-        guard var base = candidates.first else { return [] }
+    func extractLocal(from processed: ProcessedObservation, attentionScore: Double) -> [MemoryCandidate] {
+        localExtractor.extract(from: processed, attentionScore: attentionScore)
+    }
 
+    /// Cloud enrichment is reserved for admitted, high-value candidates. Automatic
+    /// captures share a cooldown; an explicit user capture may bypass it.
+    func enrich(
+        candidate: MemoryCandidate,
+        from processed: ProcessedObservation,
+        userInitiated: Bool
+    ) async -> (candidate: MemoryCandidate, cloudProcessed: Bool) {
         let cloudEnabled = AppConfiguration.cloudProcessingEnabled
-        guard cloudEnabled, processed.cloudProcessingAllowed, qwenClient.isConfigured else {
-            return candidates
+        guard cloudEnabled, processed.cloudProcessingAllowed, openAIClient.isConfigured else {
+            return (candidate, false)
         }
+        guard reserveEnrichmentSlot(userInitiated: userInitiated) else { return (candidate, false) }
 
         do {
-            let enriched = try await qwenClient.extractMemories(from: processed)
+            let enriched = try await openAIClient.extractMemories(from: processed)
             if let cloud = enriched.first {
-                base = merge(local: base, cloud: cloud)
-                candidates[0] = base
+                return (merge(local: candidate, cloud: cloud), true)
             }
         } catch {
-            // Keep the improved local summary when cloud enrichment fails.
+            // Preserve the local candidate when cloud enrichment is unavailable.
         }
+        return (candidate, false)
+    }
 
-        return candidates
+    private func reserveEnrichmentSlot(userInitiated: Bool) -> Bool {
+        if userInitiated { return true }
+        enrichmentLock.lock()
+        defer { enrichmentLock.unlock() }
+        let now = Date()
+        if let lastAutomaticEnrichmentAt,
+           now.timeIntervalSince(lastAutomaticEnrichmentAt) < OpenAIConfiguration.current.memoryEnrichmentCooldownSeconds {
+            return false
+        }
+        lastAutomaticEnrichmentAt = now
+        return true
     }
 
     private func merge(local: MemoryCandidate, cloud: MemoryCandidate) -> MemoryCandidate {

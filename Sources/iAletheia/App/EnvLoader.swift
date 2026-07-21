@@ -1,7 +1,7 @@
 import Foundation
 
 /// Loads secrets from `.env.local` for local development.
-/// Priority at runtime: Keychain → `.env.local` → process environment.
+/// Priority at runtime: Keychain -> `.env.local` -> process environment.
 enum EnvLoader {
     private static var loadedValues: [String: String] = [:]
     private static var didLoad = false
@@ -39,9 +39,6 @@ enum EnvLoader {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         urls.append(sourceRoot.appendingPathComponent(fileName))
-
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        urls.append(home.appendingPathComponent("Desktop/Qwen-Hackthon/iAletheia/\(fileName)"))
 
         var seen = Set<String>()
         return urls.filter { seen.insert($0.path).inserted }

@@ -22,7 +22,7 @@ final class MemoryAdmissionEngine {
             0.20 * interactionValue +
             0.15 * sourceValue +
             0.10 * changeSignificance -
-            0.40 * sensitivity
+            0.50 * sensitivity
         ))
     }
 

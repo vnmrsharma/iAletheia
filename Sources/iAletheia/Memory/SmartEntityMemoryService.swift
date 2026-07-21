@@ -56,18 +56,14 @@ final class SmartEntityMemoryService {
     private let memoryRepository: MemoryRepository
     private let memoryLinker: MemoryLinker
     private let memoryConsolidator: MemoryConsolidator
-    private let qwenClient: QwenClient
-
     init(
         memoryRepository: MemoryRepository,
         memoryLinker: MemoryLinker,
-        memoryConsolidator: MemoryConsolidator,
-        qwenClient: QwenClient
+        memoryConsolidator: MemoryConsolidator
     ) {
         self.memoryRepository = memoryRepository
         self.memoryLinker = memoryLinker
         self.memoryConsolidator = memoryConsolidator
-        self.qwenClient = qwenClient
     }
 
     func decide(

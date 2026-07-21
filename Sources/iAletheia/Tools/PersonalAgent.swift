@@ -4,8 +4,7 @@ import CoreGraphics
 
 /// Orchestrates smart routing: direct answer, personal memory, web search, or hybrid.
 final class PersonalAgent {
-    private let qwenClient: QwenClient
-    private let webSearchService: WebSearchService
+    private let openAIClient: OpenAIClient
     private let queryRouter: QueryRouter
     private let hybridRetriever: HybridRetriever
     private let chatLearningService: ChatLearningService
@@ -15,15 +14,13 @@ final class PersonalAgent {
     private let strongMemoryThreshold = 0.22
 
     init(
-        qwenClient: QwenClient,
-        webSearchService: WebSearchService,
+        openAIClient: OpenAIClient,
         hybridRetriever: HybridRetriever,
         chatLearningService: ChatLearningService,
         observationPipeline: ObservationPipeline
     ) {
-        self.qwenClient = qwenClient
-        self.webSearchService = webSearchService
-        self.queryRouter = QueryRouter(qwenClient: qwenClient)
+        self.openAIClient = openAIClient
+        self.queryRouter = QueryRouter(openAIClient: openAIClient)
         self.hybridRetriever = hybridRetriever
         self.chatLearningService = chatLearningService
         self.observationPipeline = observationPipeline
@@ -67,7 +64,7 @@ final class PersonalAgent {
             )
         }
 
-        guard qwenClient.isConfigured else {
+        guard openAIClient.isConfigured else {
             report(.retrieving)
             let ranked = try await hybridRetriever.retrieve(query: query)
             let relevant = ranked.filter { $0.score >= memoryRelevanceThreshold }
@@ -126,7 +123,7 @@ final class PersonalAgent {
 
         case .direct:
             report(.drafting)
-            let response = try await qwenClient.generateDirectResponse(
+            let response = try await openAIClient.generateDirectResponse(
                 query: query, personality: personality, history: history
             )
             return AgentAnswer(response: response, route: .direct, statusText: AgentActivityPhase.drafting.displayText)
@@ -138,7 +135,7 @@ final class PersonalAgent {
             }
             let memories = ranked.filter { $0.score >= memoryRelevanceThreshold }
             report(.drafting)
-            let response = try await qwenClient.generateMemoryResponse(
+            let response = try await openAIClient.generateMemoryResponse(
                 query: query, rankedMemories: memories, personality: personality
             )
             return AgentAnswer(response: response, route: .memory, statusText: AgentActivityPhase.drafting.displayText)
@@ -146,7 +143,7 @@ final class PersonalAgent {
         case .web:
             report(.searching)
             let webQuery = enrichWebQuery(query, profile: profile)
-            let response = try await qwenClient.generateWithQwenWebSearch(
+            let response = try await openAIClient.generateWithOpenAIWebSearch(
                 query: webQuery,
                 rankedMemories: [],
                 personality: personality
@@ -161,7 +158,7 @@ final class PersonalAgent {
             let memories = ranked.filter { $0.score >= memoryRelevanceThreshold }
             report(.searching)
             let webQuery = enrichWebQuery(query, profile: profile)
-            let response = try await qwenClient.generateWithQwenWebSearch(
+            let response = try await openAIClient.generateWithOpenAIWebSearch(
                 query: webQuery,
                 rankedMemories: memories,
                 personality: personality
@@ -185,8 +182,8 @@ final class PersonalAgent {
         }
 
         report(.drafting)
-        if qwenClient.isConfigured {
-            let response = try await qwenClient.generateSessionAwareResponse(
+        if openAIClient.isConfigured {
+            let response = try await openAIClient.generateSessionAwareResponse(
                 query: query,
                 history: history,
                 screenContext: screenContext,
@@ -250,19 +247,19 @@ final class PersonalAgent {
 
         report(.drafting)
         let response: AssistantResponse
-        if qwenClient.isConfigured {
+        if openAIClient.isConfigured {
             do {
-                response = try await qwenClient.generateLiveScreenResponse(
+                response = try await openAIClient.generateLiveScreenResponse(
                     query: query,
                     snapshot: snapshot,
                     personality: personality,
                     history: history
                 )
             } catch {
-                response = QwenClient.localLiveScreenAnswer(query: query, snapshot: snapshot)
+                response = OpenAIClient.localLiveScreenAnswer(query: query, snapshot: snapshot)
             }
         } else {
-            response = QwenClient.localLiveScreenAnswer(query: query, snapshot: snapshot)
+            response = OpenAIClient.localLiveScreenAnswer(query: query, snapshot: snapshot)
         }
 
         return AgentAnswer(
