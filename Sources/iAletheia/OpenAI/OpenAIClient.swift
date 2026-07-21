@@ -627,7 +627,7 @@ final class OpenAIClient {
 
         Look at the attached screenshot of the active window.
         Return the exact click point for the control that advances the goal.
-        The screenshot has a labeled (grid.rows)-row by (grid.columns)-column grid.
+        The screenshot has a labeled \(grid.rows)-row by \(grid.columns)-column grid.
         R0C0 is the top-left cell. Return grid_row and grid_column, then cell_x and
         cell_y from 0 to 1 within that cell (both measured from its top-left).
         Put the point safely inside the target, not on its border or label text.

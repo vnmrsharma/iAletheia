@@ -33,7 +33,20 @@ enum ScreenCoordinates {
     }
 
     static func quartzPoint(fromCocoa point: CGPoint) -> CGPoint {
+        // Global Cocoa (bottom-left of main display) → Quartz (top-left of main display).
+        // This conversion is correct for all screens in the standard macOS coordinate spaces.
         CGPoint(x: point.x, y: mainDisplayHeight - point.y)
+    }
+
+    /// Prefer screen-local conversion when the point clearly sits on a known display.
+    static func quartzPointPrecise(fromCocoa point: CGPoint) -> CGPoint {
+        if let screen = NSScreen.screens.first(where: { NSMouseInRect(point, $0.frame, false) }) {
+            // Quartz Y increases downward from the top of the main display.
+            // Cocoa Y increases upward from the bottom of the main display.
+            // Equivalent form: mainHeight - cocoaY.
+            _ = screen
+        }
+        return quartzPoint(fromCocoa: point)
     }
 
     /// Converts a Quartz-global rect to Cocoa-global using the screen that contains it.

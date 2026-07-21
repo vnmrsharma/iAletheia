@@ -422,6 +422,133 @@ final class ActionSafetyPolicyTests: XCTestCase {
     }
 }
 
+final class ActionTargetingTests: XCTestCase {
+    func testGridVisionClickMapsTopLeftCellToWindowTopLeft() {
+        let grid = VisionGridSpec(rows: 8, columns: 12)
+        let target = GridVisionClickTarget(
+            found: true,
+            targetLabel: "Reply",
+            gridRow: 0,
+            gridColumn: 0,
+            cellX: 0.5,
+            cellY: 0.5,
+            confidence: 0.9,
+            reasoning: "test"
+        )
+        let bounds = CGRect(x: 100, y: 200, width: 1200, height: 800)
+        let point = target.cocoaPoint(in: bounds, grid: grid)
+        XCTAssertNotNil(point)
+        // Row 0 is top of image → near window.maxY in Cocoa.
+        XCTAssertEqual(point!.x, 100 + (0.5 / 12) * 1200, accuracy: 0.5)
+        XCTAssertEqual(point!.y, 200 + 800 - (0.5 / 8) * 800, accuracy: 0.5)
+    }
+
+    func testGridVisionClickMapsBottomCellNearWindowBottom() {
+        let grid = VisionGridSpec(rows: 8, columns: 12)
+        let target = GridVisionClickTarget(
+            found: true,
+            targetLabel: "Reply",
+            gridRow: 7,
+            gridColumn: 3,
+            cellX: 0.5,
+            cellY: 0.5,
+            confidence: 0.9,
+            reasoning: "test"
+        )
+        let bounds = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let point = target.cocoaPoint(in: bounds, grid: grid)!
+        XCTAssertLessThan(point.y, 150) // near bottom in Cocoa
+        XCTAssertGreaterThan(point.x, 250)
+        XCTAssertLessThan(point.x, 450)
+    }
+
+    func testComposeVisibleWhenSendButtonBoxPresent() {
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        // Vision box near bottom of image (low normalized Y).
+        let sendBox = ScreenCaptureService.OCRTextBox(
+            text: "Send",
+            normalizedBounds: CGRect(x: 0.32, y: 0.08, width: 0.08, height: 0.04)
+        )
+        let capture = WindowCaptureResult(
+            image: makeTinyImage(),
+            cocoaBounds: bounds
+        )
+        let snapshot = ActionScreenSnapshot(
+            context: ActiveApplicationContext(
+                bundleID: "com.google.Chrome",
+                applicationName: "Google Chrome",
+                windowTitle: "Gmail",
+                pid: 1,
+                windowID: 1,
+                windowBounds: bounds
+            ),
+            capture: capture,
+            visibleText: "Send",
+            boxes: [sendBox]
+        )
+        let finder = ShowMeTargetFinder()
+        XCTAssertTrue(finder.composeVisible(in: snapshot))
+        XCTAssertNotNil(finder.findSendButtonRect(in: snapshot))
+        XCTAssertNotNil(finder.resolveComposeBody(in: snapshot))
+        let body = finder.resolveComposeBody(in: snapshot)!
+        let sendRect = finder.findSendButtonRect(in: snapshot)!
+        // Body click must be above Send (higher Cocoa Y).
+        XCTAssertGreaterThan(body.point.y, sendRect.maxY)
+    }
+
+    func testReplyBesideForwardPrefersSameRow() {
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let reply = ScreenCaptureService.OCRTextBox(
+            text: "Reply",
+            normalizedBounds: CGRect(x: 0.30, y: 0.10, width: 0.07, height: 0.035)
+        )
+        let forward = ScreenCaptureService.OCRTextBox(
+            text: "Forward",
+            normalizedBounds: CGRect(x: 0.40, y: 0.10, width: 0.09, height: 0.035)
+        )
+        let snapshot = ActionScreenSnapshot(
+            context: ActiveApplicationContext(
+                bundleID: "com.google.Chrome",
+                applicationName: "Google Chrome",
+                windowTitle: "Gmail",
+                pid: 1,
+                windowID: 1,
+                windowBounds: bounds
+            ),
+            capture: WindowCaptureResult(image: makeTinyImage(), cocoaBounds: bounds),
+            visibleText: "Reply\nForward",
+            boxes: [reply, forward]
+        )
+        let hit = ShowMeTargetFinder().findReplyBesideForward(in: snapshot)
+        XCTAssertNotNil(hit)
+        XCTAssertLessThan(hit!.point.x, 450)
+    }
+
+    func testQuartzCocoaRoundTripOnPrimaryAxis() {
+        let cocoa = CGPoint(x: 400, y: 300)
+        let quartz = ScreenCoordinates.quartzPoint(fromCocoa: cocoa)
+        let back = ScreenCoordinates.cocoaPoint(fromQuartz: quartz)
+        XCTAssertEqual(back.x, cocoa.x, accuracy: 0.01)
+        XCTAssertEqual(back.y, cocoa.y, accuracy: 0.01)
+    }
+
+    private func makeTinyImage() -> CGImage {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = CGContext(
+            data: nil,
+            width: 8,
+            height: 8,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        return context.makeImage()!
+    }
+}
+
 private final class MockURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 

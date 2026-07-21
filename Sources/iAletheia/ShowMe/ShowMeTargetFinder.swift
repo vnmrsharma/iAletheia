@@ -470,16 +470,21 @@ final class ShowMeTargetFinder {
         // view. Only trust AX editor discovery in native apps; webmail must show compose UI.
         if !Self.isBrowserContext(snapshot.context),
            resolveMessageEditor(context: snapshot.context) != nil { return true }
+
+        // Strongest signal: a compact Send button in the lower action strip.
+        if findSendButtonRect(in: snapshot) != nil { return true }
+
         let text = snapshot.visibleText.lowercased()
         let hasSend = containsWord("send", in: text)
         let fullCompose = ["recipients", "discard", "bcc", "subject"].contains { text.contains($0) }
-        // Gmail inline bottom reply: Send button in the lower strip, often with signature links.
-        let inlineCompose = boxesContainSendButton(in: snapshot)
-        return hasSend && (fullCompose || inlineCompose)
+        let signatureHints = ["linkedin", "scholar", "google scholar"].contains { text.contains($0) }
+        return hasSend && (fullCompose || signatureHints)
     }
 
-    private func boxesContainSendButton(in snapshot: ActionScreenSnapshot) -> Bool {
+    /// Finds the compact Send control in the lower composer strip (Gmail / Outlook web).
+    func findSendButtonRect(in snapshot: ActionScreenSnapshot) -> CGRect? {
         let bounds = snapshot.windowBounds
+        var best: CGRect?
         for box in snapshot.boxes + mergeAdjacentOCRBoxes(snapshot.boxes) {
             let label = normalizeLabel(box.text)
             guard label == "send" || label.hasPrefix("send ") else { continue }
@@ -487,13 +492,49 @@ final class ShowMeTargetFinder {
                 forNormalizedVisionBox: box.normalizedBounds,
                 windowCocoaBounds: bounds
             )
-            if rect.midY <= bounds.minY + bounds.height * 0.45,
-               rect.height <= 64,
-               rect.width <= 160 {
-                return true
+            guard rect.midY <= bounds.minY + bounds.height * 0.50,
+                  rect.height <= 72,
+                  rect.width <= 180,
+                  rect.width >= 28 else { continue }
+            if best == nil || rect.midY < best!.midY { best = rect }
+        }
+        return best
+    }
+
+    /// Reply control that sits on the same row as Forward (reading pane), not the compose-bar arrow.
+    func findReplyBesideForward(in snapshot: ActionScreenSnapshot) -> ShowMeActionTarget? {
+        let bounds = snapshot.windowBounds
+        let merged = mergeAdjacentOCRBoxes(snapshot.boxes)
+        var replyBoxes: [(label: String, rect: CGRect)] = []
+        var forwardBoxes: [CGRect] = []
+
+        for box in merged {
+            let label = normalizeLabel(box.text)
+            let rect = ScreenCaptureService.screenRect(
+                forNormalizedVisionBox: box.normalizedBounds,
+                windowCocoaBounds: bounds
+            )
+            guard rect.height <= 72, rect.width <= 220 else { continue }
+            guard rect.midY <= bounds.minY + bounds.height * 0.48 else { continue }
+            if label == "forward" || label.hasPrefix("forward") {
+                forwardBoxes.append(rect)
+            }
+            if label == "reply" || (label.hasPrefix("reply") && !label.contains("all")) {
+                replyBoxes.append((label, rect))
             }
         }
-        return false
+
+        for forward in forwardBoxes {
+            if let match = replyBoxes.first(where: {
+                abs($0.rect.midY - forward.midY) <= 28 && $0.rect.maxX <= forward.minX + 8
+            }) {
+                return ShowMeActionTarget(point: pointInRect(match.rect), rect: match.rect, element: nil)
+            }
+        }
+        if let reply = replyBoxes.min(by: { $0.rect.minX < $1.rect.minX }) {
+            return ShowMeActionTarget(point: pointInRect(reply.rect), rect: reply.rect, element: nil)
+        }
+        return nil
     }
 
     /// Locates the message body from the current screenshot (after Reply reshapes the page).
@@ -534,33 +575,37 @@ final class ShowMeTargetFinder {
             }
         }
 
-        if let recipientsRect, let sendRect, recipientsRect.minY > sendRect.maxY + 24 {
+        if let recipientsRect, let sendCandidate = sendRect, recipientsRect.minY > sendCandidate.maxY + 24 {
             let insetX = max(recipientsRect.minX, bounds.minX + bounds.width * 0.28)
-            let bodyMinY = sendRect.maxY + 14
+            let bodyMinY = sendCandidate.maxY + 14
             let bodyMaxY = recipientsRect.minY - 10
             let height = bodyMaxY - bodyMinY
-            guard height >= 36 else { return nil }
-            let bodyRect = CGRect(
-                x: insetX,
-                y: bodyMinY,
-                width: min(bounds.width * 0.56, max(recipientsRect.width * 2.8, 320)),
-                height: height
-            )
-            return ShowMeActionTarget(point: pointInRect(bodyRect), rect: bodyRect, element: nil)
+            if height >= 36 {
+                let bodyRect = CGRect(
+                    x: insetX,
+                    y: bodyMinY,
+                    width: min(bounds.width * 0.56, max(recipientsRect.width * 2.8, 320)),
+                    height: height
+                )
+                return ShowMeActionTarget(point: pointInRect(bodyRect), rect: bodyRect, element: nil)
+            }
         }
 
-        if let sendRect {
-            // Gmail bottom reply: writing area is ABOVE the Send/toolbar row, across the reading pane.
-            let bodyHeight = max(72, min(140, bounds.height * 0.13))
+        if let sendRect = findSendButtonRect(in: snapshot) ?? sendRect {
+            // Writing area is ABOVE the Send/toolbar row, centered in the reading pane.
+            let bodyHeight = max(80, min(150, bounds.height * 0.14))
             let bodyRect = CGRect(
-                x: bounds.minX + bounds.width * 0.34,
-                y: sendRect.maxY + 20,
-                width: bounds.width * 0.50,
+                x: bounds.minX + bounds.width * 0.36,
+                y: sendRect.maxY + 28,
+                width: bounds.width * 0.48,
                 height: bodyHeight
             )
-            let clamped = bodyRect.intersection(bounds.insetBy(dx: 8, dy: 8))
-            if clamped.width >= 120, clamped.height >= 40 {
-                return ShowMeActionTarget(point: pointInRect(clamped), rect: clamped, element: nil)
+            let clamped = bodyRect.intersection(bounds.insetBy(dx: 10, dy: 10))
+            if clamped.width >= 120, clamped.height >= 48 {
+                // Click in the upper portion of the body so we land in the empty draft
+                // area rather than on the Send button or the reply-arrow icon.
+                let point = CGPoint(x: clamped.midX, y: clamped.midY + clamped.height * 0.15)
+                return ShowMeActionTarget(point: point, rect: clamped, element: nil)
             }
         }
 
