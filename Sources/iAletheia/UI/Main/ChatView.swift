@@ -139,11 +139,28 @@ struct ChatView: View {
                 showMeCoachCard(guide: guide, step: step)
             }
 
+            if appState.isActionRunning {
+                HStack {
+                    Label(appState.actionStatusText ?? "Running draft action…", systemImage: "cursorarrow.motionlines")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.textSecondary)
+                    Spacer()
+                    Button("Stop Action") {
+                        appState.cancelAction()
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+            }
+
             ThemedChatInput(
                 text: $query,
-                placeholder: appState.showMeEnabled
-                    ? "Ask how to do something on screen…"
-                    : "Ask me anything you've been working on…",
+                placeholder: appState.actionEnabled
+                    ? "Ask me to draft a reply in the current app…"
+                    : (appState.showMeEnabled
+                        ? "Ask how to do something on screen…"
+                        : "Ask me anything you've been working on…"),
                 isLoading: appState.isQuerying,
                 onSend: { Task { await submitQuery() } },
                 isFocused: $isInputFocused
@@ -164,6 +181,9 @@ struct ChatView: View {
 
                 Button {
                     appState.showMeEnabled.toggle()
+                    if appState.showMeEnabled {
+                        appState.actionEnabled = false
+                    }
                     if !appState.showMeEnabled {
                         appState.endShowMeGuide(announce: false)
                         ShowMeOverlayController.shared.hide()
@@ -174,6 +194,20 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Guide you on screen step by step (does not click for you)")
+
+                Button {
+                    appState.actionEnabled.toggle()
+                    if appState.actionEnabled {
+                        appState.showMeEnabled = false
+                        appState.endShowMeGuide(announce: false)
+                        ShowMeOverlayController.shared.hide()
+                    }
+                } label: {
+                    Label("Action", systemImage: "cursorarrow.motionlines")
+                        .foregroundStyle(appState.actionEnabled ? AppTheme.green : AppTheme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Draft text in the current email or message field. Action mode never sends or submits.")
 
                 Spacer()
                 StatusBadge(text: appState.openAIConfigured ? "OpenAI connected" : "Local only", active: appState.openAIConfigured)

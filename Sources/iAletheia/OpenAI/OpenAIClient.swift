@@ -569,6 +569,48 @@ final class OpenAIClient {
         return plan
     }
 
+    func generateDraftActionPlan(
+        query: String,
+        snapshot: LiveScreenSnapshot?,
+        appName: String,
+        windowTitle: String?,
+        personality: String
+    ) async throws -> DraftActionPlan {
+        var prompt = """
+        User request: \(query)
+        Active app: \(appName)
+        Window title: \(windowTitle ?? "unknown")
+        """
+        if let snapshot {
+            prompt += "\n\nLIVE SCREEN SNAPSHOT:\n\(snapshot.contextBlock())"
+        }
+
+        let result = try await createResponse(
+            model: configuration().reasoningModel,
+            instructions: """
+            Create a minimal, draft-only UI action plan for the current email or messaging window.
+            The plan may click an exact Reply/Respond control, focus an exact editable message field, and write a polished draft.
+            Reason about the current UI state before choosing a target. If an email is open for reading, a Reply control is visible, and no composer is open, the first step MUST click Reply; the read-only email body is not a text field. Then type only after the reply editor appears.
+            Infer the user's editing intent from both the request and current screen. Use type_text for an empty composer or an explicit append. Use replace_text when the user asks to rewrite, revise, edit, rephrase, shorten, expand, improve, change, or replace an existing draft. replace_text replaces only the focused message body, never recipients or subject fields.
+            It must NEVER click or target Send, Post, Submit, Publish, Confirm, Delete, Purchase, or any equivalent control.
+            It must NEVER include a keyboard shortcut, Return/Enter action, form submission, attachment, recipient change, subject change, or navigation away from the current conversation.
+            Click steps are allowed only for exact Reply or Respond controls. Do not create a new conversation or change recipients.
+            Use exact visible Accessibility labels in target_hints. If clicking Reply normally focuses the editor, the immediately following type_text step may use an empty target_hints array.
+            Keep the plan to the fewest safe steps. The typed draft must not contain markdown and must not include instructions outside the message itself.
+            \(personality)
+            """,
+            prompt: prompt,
+            maxOutputTokens: 1_400,
+            effort: .medium,
+            verbosity: .low,
+            jsonSchema: Self.draftActionSchema
+        )
+        guard let plan = try? JSONDecoder().decode(DraftActionPlan.self, from: Data(result.text.utf8)) else {
+            throw ActionError.invalidPlan
+        }
+        return plan
+    }
+
     private func structuredAssistantResponse(
         result: OpenAIResponseResult,
         memories: [Memory],
@@ -765,6 +807,34 @@ final class OpenAIClient {
                 ]
             ],
             "required": ["intro", "steps"],
+            "additionalProperties": false
+        ]
+    ]
+
+    private static let draftActionSchema: [String: Any] = [
+        "type": "json_schema",
+        "name": "draft_action_plan",
+        "strict": true,
+        "schema": [
+            "type": "object",
+            "properties": [
+                "summary": ["type": "string"],
+                "steps": [
+                    "type": "array",
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "kind": ["type": "string", "enum": ["click", "type_text", "replace_text"]],
+                            "title": ["type": "string"],
+                            "target_hints": ["type": "array", "items": ["type": "string"]],
+                            "text": ["type": ["string", "null"]]
+                        ],
+                        "required": ["kind", "title", "target_hints", "text"],
+                        "additionalProperties": false
+                    ]
+                ]
+            ],
+            "required": ["summary", "steps"],
             "additionalProperties": false
         ]
     ]

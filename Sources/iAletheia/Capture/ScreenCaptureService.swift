@@ -5,9 +5,15 @@ import Foundation
 import ScreenCaptureKit
 import Vision
 
+struct WindowCaptureResult {
+    let image: CGImage
+    /// Cocoa-global bounds that align with the captured image pixels.
+    let cocoaBounds: CGRect
+}
+
 final class ScreenCaptureService {
     /// Captures the frontmost / specified on-screen window for `pid` (never “largest window”).
-    func captureActiveWindowImage(for pid: pid_t, windowID: CGWindowID? = nil, windowBounds: CGRect? = nil) async throws -> CGImage? {
+    func captureActiveWindow(for pid: pid_t, windowID: CGWindowID? = nil, windowBounds: CGRect? = nil) async throws -> WindowCaptureResult? {
         if !CGPreflightScreenCaptureAccess() {
             _ = CGRequestScreenCaptureAccess()
         }
@@ -15,27 +21,42 @@ final class ScreenCaptureService {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let resolvedID = windowID ?? frontmostCGWindowID(for: pid)
 
-        // 1) Exact window ID (frontmost active window across multi-monitor setups)
         if let resolvedID,
-           let image = try await captureWindowID(resolvedID, from: content) {
-            return prepareForOCR(image)
+           let window = content.windows.first(where: { $0.windowID == resolvedID && $0.isOnScreen }) {
+            let image = try await screenshot(window: window)
+            let bounds = cocoaBounds(for: window) ?? windowBounds ?? ScreenCoordinates.cocoaRectForGlobalQuartz(window.frame)
+            return WindowCaptureResult(image: prepareForOCR(image), cocoaBounds: bounds)
         }
 
-        // 2) Frontmost SCWindow for this PID (z-order via CG), not largest-by-area
-        if let image = try await captureFrontmostWindow(from: content, pid: pid) {
-            return prepareForOCR(image)
+        if let targetID = frontmostCGWindowID(for: pid),
+           let window = content.windows.first(where: { $0.windowID == targetID && $0.isOnScreen }) {
+            let image = try await screenshot(window: window)
+            let bounds = cocoaBounds(for: window) ?? windowBounds ?? ScreenCoordinates.cocoaRectForGlobalQuartz(window.frame)
+            return WindowCaptureResult(image: prepareForOCR(image), cocoaBounds: bounds)
         }
 
-        // 3) Display that contains the active window (multi-monitor safe)
+        let eligible = eligibleWindows(from: content).filter { $0.owningApplication?.processID == pid }
+        if let window = eligible.first {
+            let image = try await screenshot(window: window)
+            let bounds = cocoaBounds(for: window) ?? windowBounds ?? ScreenCoordinates.cocoaRectForGlobalQuartz(window.frame)
+            return WindowCaptureResult(image: prepareForOCR(image), cocoaBounds: bounds)
+        }
+
         if let image = try await captureDisplayContaining(
             bounds: windowBounds,
             from: content,
             excludingOwnWindows: true
         ) {
-            return prepareForOCR(image)
+            let bounds = windowBounds ?? NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+            return WindowCaptureResult(image: prepareForOCR(image), cocoaBounds: bounds)
         }
 
         return nil
+    }
+
+    /// Captures the frontmost / specified on-screen window for `pid` (never “largest window”).
+    func captureActiveWindowImage(for pid: pid_t, windowID: CGWindowID? = nil, windowBounds: CGRect? = nil) async throws -> CGImage? {
+        try await captureActiveWindow(for: pid, windowID: windowID, windowBounds: windowBounds)?.image
     }
 
     func ocrText(from image: CGImage) async throws -> String {
@@ -95,7 +116,7 @@ final class ScreenCaptureService {
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = false
             request.recognitionLanguages = ["en-US"]
-            request.minimumTextHeight = 0.008
+            request.minimumTextHeight = 0.004
             let handler = VNImageRequestHandler(cgImage: image, options: [:])
             do {
                 try handler.perform([request])
@@ -116,6 +137,12 @@ final class ScreenCaptureService {
     }
 
     // MARK: - ScreenCaptureKit
+
+    private func cocoaBounds(for window: SCWindow) -> CGRect? {
+        let quartz = window.frame
+        guard quartz.width > 2, quartz.height > 2 else { return nil }
+        return ScreenCoordinates.cocoaRectForGlobalQuartz(quartz)
+    }
 
     private func captureWindowID(_ windowID: CGWindowID, from content: SCShareableContent) async throws -> CGImage? {
         guard let window = content.windows.first(where: { $0.windowID == windowID && $0.isOnScreen }) else {

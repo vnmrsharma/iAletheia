@@ -15,6 +15,7 @@ Built with Codex and the GPT-5.6 family for [OpenAI Build Week](https://openai.d
 - Native OpenAI web search with source citations
 - Live-screen code review, page summaries, and message drafting
 - **Show Me** guidance that points to visible controls without clicking for the user
+- Opt-in **Action mode** that visibly moves the cursor and types drafts into verified reply fields
 - Local fallback when cloud processing is disabled or unavailable
 
 ## Architecture
@@ -36,6 +37,9 @@ flowchart LR
     Admission -. "admitted enrichment" .-> OpenAI
     Agent --> UI
 ```
+
+Action mode is intentionally draft-only. It can select a verified Reply/Respond control, focus a verified message editor, type a response, append requested text, or safely replace an existing draft when asked to rewrite or revise it. It rejects recipient, subject, and search fields, stops when the intended editor cannot be verified, and has no operation for Send, Submit, Post, Publish, Delete, Purchase, or Confirm.
+It requires Accessibility permission, cloud processing, GPT-5.6 access, and Private Mode to be off.
 
 All cloud requests go through [`OpenAIClient.swift`](Sources/iAletheia/OpenAI/OpenAIClient.swift) using `POST /v1/responses`.
 
@@ -66,6 +70,7 @@ Every request uses:
 - Automatic memory enrichment happens only after local admission scoring.
 - Enrichment input is capped at 4,000 characters and has a five-minute default cooldown.
 - Web search and cloud processing can be disabled independently in Settings.
+- Action mode is off by default and must be selected explicitly in the chat footer.
 
 `store: false` disables Responses API application-state storage, but standard API data-control and abuse-monitoring policies still apply.
 
@@ -114,6 +119,7 @@ swift test --disable-sandbox
 
 ```text
 Sources/iAletheia/
+├── Actions/      Draft-only planning, safety policy, and cursor execution
 ├── App/          Application state and dependency wiring
 ├── Capture/      Active-window capture and OCR
 ├── Chat/         Chat sessions and persistence
@@ -135,7 +141,7 @@ The project was created during the submission period. Codex was used for archite
 ## Verification
 
 - `swift build --disable-sandbox` passes
-- `swift test --disable-sandbox` passes all 7 tests
+- `swift test --disable-sandbox` passes all 11 tests
 - A live API smoke test requires the entrant's OpenAI API key and GPT-5.6 access
 
 ## License

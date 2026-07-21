@@ -53,6 +53,100 @@ final class ActiveApplicationService {
         return topmostNonSelfWindowContext()
     }
 
+    /// Refresh sticky window title/bounds before Action / Show Me targeting.
+    func refreshContextForAction(_ context: ActiveApplicationContext) -> ActiveApplicationContext {
+        refresh(context)
+    }
+
+    /// Brings the remembered app window to the front and returns refreshed bounds.
+    func activateWindow(for context: ActiveApplicationContext) -> ActiveApplicationContext? {
+        guard let app = NSRunningApplication(processIdentifier: context.pid) else { return nil }
+        app.activate()
+
+        let appElement = AXUIElementCreateApplication(context.pid)
+        _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+
+        let targetWindow = windowElement(matching: context)
+        if let targetWindow {
+            _ = AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(targetWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
+        }
+
+        // Give Chrome / webmail a beat to repaint after focus changes.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+        return refreshContextForAction(context)
+    }
+
+    private func windowElement(matching context: ActiveApplicationContext) -> AXUIElement? {
+        let appElement = AXUIElementCreateApplication(context.pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement], !windows.isEmpty else {
+            return optionalAX(appElement, kAXFocusedWindowAttribute as String)
+        }
+
+        if let title = context.windowTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            if let match = windows.first(where: { axWindowTitle($0).localizedCaseInsensitiveContains(title) || title.localizedCaseInsensitiveContains(axWindowTitle($0)) }) {
+                return match
+            }
+        }
+
+        if let id = context.windowID,
+           let bounds = windowMetadata(id: id)?.bounds ?? context.windowBounds {
+            var best: (window: AXUIElement, overlap: CGFloat)?
+            for window in windows {
+                guard let frame = axWindowFrame(window, expectedBounds: bounds) else { continue }
+                let overlap = overlapRatio(frame, bounds)
+                if best == nil || overlap > best!.overlap {
+                    best = (window, overlap)
+                }
+            }
+            if let best, best.overlap > 0.35 { return best.window }
+        }
+
+        return optionalAX(appElement, kAXFocusedWindowAttribute as String) ?? windows.first
+    }
+
+    private func axWindowTitle(_ window: AXUIElement) -> String {
+        var titleValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
+              let title = titleValue as? String else { return "" }
+        return title
+    }
+
+    private func axWindowFrame(_ window: AXUIElement, expectedBounds: CGRect) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              CFGetTypeID(positionValue as CFTypeRef) == AXValueGetTypeID(),
+              CFGetTypeID(sizeValue as CFTypeRef) == AXValueGetTypeID() else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        AXValueGetValue(positionValue as! AXValue, .cgPoint, &position)
+        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        guard size.width > 2, size.height > 2 else { return nil }
+        let native = CGRect(origin: position, size: size)
+        let converted = ScreenCoordinates.cocoaRect(fromQuartz: native)
+        let nativeOverlap = overlapRatio(native, expectedBounds)
+        let convertedOverlap = overlapRatio(converted, expectedBounds)
+        if nativeOverlap == 0, convertedOverlap == 0 { return nil }
+        return convertedOverlap > nativeOverlap ? converted : native
+    }
+
+    private func overlapRatio(_ frame: CGRect, _ bounds: CGRect) -> CGFloat {
+        let intersection = frame.intersection(bounds)
+        guard !intersection.isNull, frame.width > 0, frame.height > 0 else { return 0 }
+        return (intersection.width * intersection.height) / (frame.width * frame.height)
+    }
+
+    private func optionalAX(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &ref) == .success else { return nil }
+        return (ref as! AXUIElement)
+    }
+
     /// Call right before the floating chat becomes key so we lock onto the window the user was viewing.
     func rememberUserContextBeforeFocusSteal() {
         if let live = probeLiveUserContext() {

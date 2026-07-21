@@ -40,6 +40,12 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Action Mode") {
+                Text("Draft-only automation can move the cursor, select a verified Reply control or editable message field, and type text. It never sends or submits.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Privacy") {
                 Text("Capture, OCR, and memory storage happen locally on your Mac.")
                 Text("Screenshots are never persisted.")

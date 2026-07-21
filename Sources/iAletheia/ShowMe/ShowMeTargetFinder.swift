@@ -20,14 +20,112 @@ enum ShowMeWatchVerdict: Equatable {
     case wrongAction(correction: String)
 }
 
+struct ShowMeActionTarget {
+    let point: CGPoint
+    let rect: CGRect
+    let element: AXUIElement?
+
+    var hasAccessibilityElement: Bool { element != nil }
+}
+
 private enum ShowMeSearchBand {
     case full
     /// Top strip of the window — ribbons, New message, Send, toolbars.
     case toolbar
+    /// Reading-pane actions — Reply / Forward under an open email (Gmail, Outlook web).
+    case contentActions
 }
 
 /// Finds on-screen UI targets via Accessibility + OCR so Show Me can point at real controls.
 final class ShowMeTargetFinder {
+    /// Resolves an Action-mode target with OCR + AX retries. Prefers visual lock for browsers.
+    func resolveActionTargetAsync(
+        hints: [String],
+        context: ActiveApplicationContext,
+        captureService: ScreenCaptureService,
+        preferVisualFirst: Bool = false
+    ) async -> ShowMeActionTarget? {
+        let expanded = expandedActionHints(hints)
+        guard !expanded.isEmpty else { return nil }
+        let windowBounds = context.windowBounds ?? fallbackWindowBounds()
+        let primaryBand = searchBand(for: expanded)
+        let bands: [ShowMeSearchBand] = {
+            if primaryBand == .contentActions { return [.contentActions, .full] }
+            if primaryBand == .toolbar { return [.toolbar, .full] }
+            return [.full]
+        }()
+
+        let attempts: [Bool] = preferVisualFirst ? [true, false] : [false, true]
+        for preferVisual in attempts {
+            for band in bands {
+                if preferVisual,
+                   let visual = await findViaOCR(
+                    hints: expanded,
+                    context: context,
+                    captureService: captureService,
+                    band: band,
+                    actionMode: true
+                   ) {
+                    return ShowMeActionTarget(point: visual.point, rect: visual.rect, element: nil)
+                }
+
+                if let ax = findInAccessibilityTarget(
+                    pid: context.pid,
+                    hints: expanded,
+                    windowBounds: windowBounds,
+                    preciseOnly: true,
+                    band: band,
+                    preferredWindowTitle: context.windowTitle,
+                    actionMode: true
+                ) {
+                    return ax
+                }
+
+                if !preferVisual,
+                   let visual = await findViaOCR(
+                    hints: expanded,
+                    context: context,
+                    captureService: captureService,
+                    band: band,
+                    actionMode: true
+                   ) {
+                    return ShowMeActionTarget(point: visual.point, rect: visual.rect, element: nil)
+                }
+            }
+        }
+
+        if primaryBand != .toolbar,
+           let loose = findInAccessibilityTarget(
+            pid: context.pid,
+            hints: expanded,
+            windowBounds: windowBounds,
+            preciseOnly: false,
+            band: .full,
+            preferredWindowTitle: context.windowTitle,
+            actionMode: true
+           ) {
+            return loose
+        }
+        return nil
+    }
+
+    /// Raises the exact remembered app window after the floating widget relinquishes focus.
+    /// App activation alone is insufficient when a browser has multiple windows.
+    func activateRememberedWindow(context: ActiveApplicationContext) -> Bool {
+        let app = AXUIElementCreateApplication(context.pid)
+        let windows = copyAttribute(app, kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+        let target = context.windowTitle.flatMap { wanted in
+            windows.first(where: { windowMatches($0, title: wanted) })
+        } ?? optionalAX(app, kAXFocusedWindowAttribute as String)
+        guard let target else { return false }
+
+        _ = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(target, kAXMainAttribute as CFString, kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        let raised = AXUIElementPerformAction(target, kAXRaiseAction as CFString)
+        return raised == .success || windowMatches(target, title: context.windowTitle ?? "")
+    }
+
     /// Full resolve for planning: precise AX → OCR → loose AX → region guess.
     func resolve(
         hints: [String],
@@ -102,6 +200,74 @@ final class ShowMeTargetFinder {
             windowBounds: windowBounds,
             preciseOnly: true,
             band: band
+        )
+    }
+
+    /// Resolves the live AX element as well as its frame so Action mode can invoke
+    /// the exact control rather than relying only on a potentially stale coordinate.
+    func resolveActionTarget(hints: [String], context: ActiveApplicationContext) -> ShowMeActionTarget? {
+        let expanded = expandedActionHints(hints)
+        guard !expanded.isEmpty else { return nil }
+        let windowBounds = context.windowBounds ?? fallbackWindowBounds()
+        let band = searchBand(for: expanded)
+        return findInAccessibilityTarget(
+            pid: context.pid,
+            hints: expanded,
+            windowBounds: windowBounds,
+            preciseOnly: true,
+            band: band,
+            preferredWindowTitle: context.windowTitle,
+            actionMode: true
+        )
+    }
+
+    func press(_ target: ShowMeActionTarget) -> Bool {
+        guard let element = target.element else { return false }
+        return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+    }
+
+    func focus(_ target: ShowMeActionTarget) -> Bool {
+        guard let element = target.element else { return false }
+        if AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
+            return true
+        }
+        return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+    }
+
+    /// Finds a newly-created writable message body after Reply opens a web composer.
+    /// Recipient, subject, search, and other compact text fields are excluded.
+    func resolveMessageEditor(context: ActiveApplicationContext) -> ShowMeActionTarget? {
+        let app = AXUIElementCreateApplication(context.pid)
+        let windowBounds = context.windowBounds ?? fallbackWindowBounds()
+        let windows = copyAttribute(app, kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+        let preferred = context.windowTitle.flatMap { wanted in
+            windows.first(where: { windowMatches($0, title: wanted) })
+        }
+        guard let root = preferred ?? optionalAX(app, kAXFocusedWindowAttribute as String) else { return nil }
+        var best: (score: Int, area: CGFloat, rect: CGRect, element: AXUIElement)?
+        searchMessageEditor(element: root, depth: 0, windowBounds: windowBounds, best: &best)
+        guard let best else { return nil }
+        return ShowMeActionTarget(point: pointInRect(best.rect), rect: best.rect, element: best.element)
+    }
+
+    /// Exact visual fallback for browser controls omitted from the AX tree. This never
+    /// returns a guessed region: a matching OCR box must exist inside the locked window.
+    func resolveExactOCRTarget(
+        hints: [String],
+        context: ActiveApplicationContext,
+        captureService: ScreenCaptureService
+    ) async -> (point: CGPoint, rect: CGRect)? {
+        let normalizedHints = hints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !normalizedHints.isEmpty else { return nil }
+        let band = searchBand(for: normalizedHints)
+        return await findViaOCR(
+            hints: normalizedHints,
+            context: context,
+            captureService: captureService,
+            band: band,
+            actionMode: true
         )
     }
 
@@ -197,51 +363,195 @@ final class ShowMeTargetFinder {
         hints: [String],
         context: ActiveApplicationContext,
         captureService: ScreenCaptureService,
-        band: ShowMeSearchBand
+        band: ShowMeSearchBand,
+        actionMode: Bool = false
     ) async -> (point: CGPoint, rect: CGRect)? {
-        guard let image = try? await captureService.captureActiveWindowImage(
-            for: context.pid,
-            windowID: context.windowID,
-            windowBounds: context.windowBounds
-        ) else { return nil }
+        await OwlWidgetController.shared.withPanelHiddenForCapture {
+            guard let capture = try? await captureService.captureActiveWindow(
+                for: context.pid,
+                windowID: context.windowID,
+                windowBounds: context.windowBounds
+            ) else { return nil }
 
-        guard let boxes = try? await captureService.ocrTextBoxes(from: image), !boxes.isEmpty else {
-            return nil
-        }
-
-        let windowBounds = context.windowBounds ?? fallbackWindowBounds()
-        var best: (score: Int, area: CGFloat, rect: CGRect)?
-
-        for box in boxes {
-            let raw = box.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let label = normalizeLabel(raw)
-            guard !label.isEmpty, !looksLikeInboxNoise(raw) else { continue }
-
-            let score = hintMatchScore(label: label, hints: hints)
-            guard score >= 12 else { continue } // reject weak "message" substring hits
-
-            let screen = ScreenCaptureService.screenRect(
-                forNormalizedVisionBox: box.normalizedBounds,
-                windowCocoaBounds: windowBounds
-            )
-            guard acceptsFrame(screen, windowBounds: windowBounds, band: band, toolbarBias: isToolbarAction(hints, regionHint: nil)) else {
-                continue
+            guard let boxes = try? await captureService.ocrTextBoxes(from: capture.image), !boxes.isEmpty else {
+                return nil
             }
 
-            let area = screen.width * screen.height
-            if area > windowBounds.width * windowBounds.height * 0.08 { continue }
-            if screen.height > 64 { continue }
+            let windowBounds = capture.cocoaBounds
+            // Keep original word boxes. Merging can turn two neighbouring buttons into
+            // one label ("Reply Forward") and destroy the exact actionable target.
+            let candidates = boxes + mergeAdjacentOCRBoxes(boxes)
+            let minScore = actionMode ? 8 : 12
+            var best: (score: Int, area: CGFloat, rect: CGRect)?
 
-            var ranked = score
-            ranked += toolbarPositionBonus(frame: screen, windowBounds: windowBounds, hints: hints)
+            for box in candidates {
+                let raw = box.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = normalizeLabel(raw)
+                guard !label.isEmpty, !looksLikeInboxNoise(raw) else { continue }
 
-            if best == nil || ranked > best!.score || (ranked == best!.score && area < best!.area) {
-                best = (ranked, area, screen)
+                let score = actionMode
+                    ? actionHintMatchScore(label: label, hints: hints)
+                    : hintMatchScore(label: label, hints: hints)
+                guard score >= minScore else { continue }
+
+                let screen = ScreenCaptureService.screenRect(
+                    forNormalizedVisionBox: box.normalizedBounds,
+                    windowCocoaBounds: windowBounds
+                )
+                guard acceptsFrame(
+                    screen,
+                    windowBounds: windowBounds,
+                    band: band,
+                    toolbarBias: isToolbarAction(hints, regionHint: nil),
+                    actionMode: actionMode
+                ) else {
+                    continue
+                }
+
+                if actionMode && isContentAction(hints, regionHint: nil),
+                   !looksLikeReplyLabel(label) {
+                    continue
+                }
+
+                let area = screen.width * screen.height
+                if area > windowBounds.width * windowBounds.height * 0.08 { continue }
+                if screen.height > 88 { continue }
+
+                var ranked = score
+                ranked += toolbarPositionBonus(frame: screen, windowBounds: windowBounds, hints: hints)
+                ranked += contentActionPositionBonus(frame: screen, windowBounds: windowBounds, hints: hints)
+                ranked += replyButtonPositionBonus(frame: screen, windowBounds: windowBounds, hints: hints)
+
+                if best == nil || ranked > best!.score || (ranked == best!.score && area < best!.area) {
+                    best = (ranked, area, screen)
+                }
             }
+
+            guard let best else { return nil }
+            return (pointInRect(best.rect), best.rect)
+        }
+    }
+
+    /// Clicks the inline compose body after Reply opens in Gmail / Outlook web.
+    func resolveComposeBodyTarget(
+        context: ActiveApplicationContext,
+        captureService: ScreenCaptureService
+    ) async -> ShowMeActionTarget? {
+        if let ax = resolveMessageEditor(context: context) {
+            return ax
+        }
+        return await OwlWidgetController.shared.withPanelHiddenForCapture {
+            guard let capture = try? await captureService.captureActiveWindow(
+                for: context.pid,
+                windowID: context.windowID,
+                windowBounds: context.windowBounds
+            ),
+            let boxes = try? await captureService.ocrTextBoxes(from: capture.image) else { return nil }
+
+            let bounds = capture.cocoaBounds
+            var anchorRect: CGRect?
+            for box in mergeAdjacentOCRBoxes(boxes) {
+                let label = normalizeLabel(box.text)
+                if label.contains("recipient") || label == "to" || label.hasPrefix("to ") {
+                    let rect = ScreenCaptureService.screenRect(
+                        forNormalizedVisionBox: box.normalizedBounds,
+                        windowCocoaBounds: bounds
+                    )
+                    if rect.midX > bounds.minX + bounds.width * 0.22 {
+                        anchorRect = rect
+                        break
+                    }
+                }
+            }
+
+            let bodyRect: CGRect
+            if let anchorRect {
+                let bodyHeight = max(72, bounds.height * 0.14)
+                bodyRect = CGRect(
+                    x: anchorRect.minX,
+                    y: anchorRect.minY - bodyHeight - 8,
+                    width: min(bounds.width * 0.58, max(anchorRect.width * 2.4, 300)),
+                    height: bodyHeight
+                )
+            } else {
+                bodyRect = CGRect(
+                    x: bounds.minX + bounds.width * 0.30,
+                    y: bounds.minY + bounds.height * 0.34,
+                    width: bounds.width * 0.55,
+                    height: bounds.height * 0.22
+                )
+            }
+            return ShowMeActionTarget(point: pointInRect(bodyRect), rect: bodyRect, element: nil)
+        }
+    }
+
+    func composeIsOpen(
+        context: ActiveApplicationContext,
+        captureService: ScreenCaptureService
+    ) async -> Bool {
+        if resolveMessageEditor(context: context) != nil { return true }
+        return await OwlWidgetController.shared.withPanelHiddenForCapture {
+            guard let capture = try? await captureService.captureActiveWindow(
+                for: context.pid,
+                windowID: context.windowID,
+                windowBounds: context.windowBounds
+            ) else { return false }
+            let text = ((try? await captureService.ocrText(from: capture.image)) ?? "").lowercased()
+            let hasSend = containsWord("send", in: text)
+            let hasComposeChrome = ["recipients", "discard", "bcc", "subject"].contains { text.contains($0) }
+            return hasSend && hasComposeChrome
+        }
+    }
+
+    private func isInBottomActionStrip(frame: CGRect, windowBounds: CGRect) -> Bool {
+        frame.midY <= windowBounds.minY + windowBounds.height * 0.42
+    }
+
+    private func looksLikeReplyLabel(_ label: String) -> Bool {
+        let canonical = label.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+        return canonical == "reply" || canonical == "respond"
+            || (canonical.hasPrefix("reply ") && !canonical.hasPrefix("reply all") && canonical.count <= 20)
+    }
+
+    private func replyButtonPositionBonus(frame: CGRect, windowBounds: CGRect, hints: [String]) -> Int {
+        guard isContentAction(hints, regionHint: nil) else { return 0 }
+        if isInBottomActionStrip(frame: frame, windowBounds: windowBounds) { return 12 }
+        return -40
+    }
+
+    private func mergeAdjacentOCRBoxes(_ boxes: [ScreenCaptureService.OCRTextBox]) -> [ScreenCaptureService.OCRTextBox] {
+        guard boxes.count > 1 else { return boxes }
+        var merged: [ScreenCaptureService.OCRTextBox] = []
+        let sorted = boxes.sorted {
+            if abs($0.normalizedBounds.midY - $1.normalizedBounds.midY) > 0.012 {
+                return $0.normalizedBounds.midY > $1.normalizedBounds.midY
+            }
+            return $0.normalizedBounds.minX < $1.normalizedBounds.minX
         }
 
-        guard let best else { return nil }
-        return (pointInRect(best.rect), best.rect)
+        var index = 0
+        while index < sorted.count {
+            var current = sorted[index]
+            var nextIndex = index + 1
+            while nextIndex < sorted.count {
+                let candidate = sorted[nextIndex]
+                let sameLine = abs(candidate.normalizedBounds.midY - current.normalizedBounds.midY) <= 0.014
+                let adjacent = candidate.normalizedBounds.minX - current.normalizedBounds.maxX <= 0.04
+                if sameLine && adjacent {
+                    let union = current.normalizedBounds.union(candidate.normalizedBounds)
+                    current = ScreenCaptureService.OCRTextBox(
+                        text: "\(current.text) \(candidate.text)",
+                        normalizedBounds: union
+                    )
+                    nextIndex += 1
+                } else {
+                    break
+                }
+            }
+            merged.append(current)
+            index = nextIndex
+        }
+        return merged
     }
 
     // MARK: - AX search
@@ -253,23 +563,47 @@ final class ShowMeTargetFinder {
         preciseOnly: Bool,
         band: ShowMeSearchBand
     ) -> (point: CGPoint, rect: CGRect)? {
-        let app = AXUIElementCreateApplication(pid)
-        var best: (score: Int, area: CGFloat, rect: CGRect)?
+        guard let target = findInAccessibilityTarget(
+            pid: pid,
+            hints: hints,
+            windowBounds: windowBounds,
+            preciseOnly: preciseOnly,
+            band: band
+        ) else { return nil }
+        return (target.point, target.rect)
+    }
 
-        if let focused = optionalAX(app, kAXFocusedWindowAttribute as String) {
+    private func findInAccessibilityTarget(
+        pid: pid_t,
+        hints: [String],
+        windowBounds: CGRect,
+        preciseOnly: Bool,
+        band: ShowMeSearchBand,
+        preferredWindowTitle: String? = nil,
+        actionMode: Bool = false
+    ) -> ShowMeActionTarget? {
+        let app = AXUIElementCreateApplication(pid)
+        var best: (score: Int, area: CGFloat, rect: CGRect, element: AXUIElement)?
+        let windows = copyAttribute(app, kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+        let preferredWindow = preferredWindowTitle.flatMap { wanted in
+            windows.first(where: { windowMatches($0, title: wanted) })
+        }
+
+        if let root = preferredWindow ?? optionalAX(app, kAXFocusedWindowAttribute as String) {
             search(
-                element: focused,
+                element: root,
                 hints: hints,
                 depth: 0,
                 windowBounds: windowBounds,
                 preciseOnly: preciseOnly,
                 band: band,
+                actionMode: actionMode,
                 best: &best
             )
         }
 
-        if best == nil, let windows = copyAttribute(app, kAXWindowsAttribute as String) as? [AXUIElement] {
-            for window in windows.prefix(3) {
+        if best == nil {
+            for window in windows.prefix(4) {
                 search(
                     element: window,
                     hints: hints,
@@ -277,6 +611,7 @@ final class ShowMeTargetFinder {
                     windowBounds: windowBounds,
                     preciseOnly: preciseOnly,
                     band: band,
+                    actionMode: actionMode,
                     best: &best
                 )
                 if best != nil { break }
@@ -284,7 +619,16 @@ final class ShowMeTargetFinder {
         }
 
         guard let best, best.score >= 12 else { return nil }
-        return (pointInRect(best.rect), best.rect)
+        return ShowMeActionTarget(point: pointInRect(best.rect), rect: best.rect, element: best.element)
+    }
+
+    private func windowMatches(_ window: AXUIElement, title wanted: String) -> Bool {
+        let wanted = normalizeLabel(wanted)
+        guard wanted.count >= 3 else { return false }
+        return elementLabels(window, includeValue: false).contains { candidate in
+            let candidate = normalizeLabel(candidate)
+            return candidate == wanted || candidate.contains(wanted) || wanted.contains(candidate)
+        }
     }
 
     private func search(
@@ -294,21 +638,24 @@ final class ShowMeTargetFinder {
         windowBounds: CGRect,
         preciseOnly: Bool,
         band: ShowMeSearchBand,
-        best: inout (score: Int, area: CGFloat, rect: CGRect)?
+        actionMode: Bool = false,
+        best: inout (score: Int, area: CGFloat, rect: CGRect, element: AXUIElement)?
     ) {
-        guard depth < 20 else { return }
+        guard depth < 22 else { return }
 
         let role = normalizeLabel(elementRole(element) ?? "")
-        // Prefer title/description for buttons; AXValue often holds email list text.
         let preferValue = role.contains("axtextfield") || role.contains("axtextarea")
         let labels = elementLabels(element, includeValue: preferValue).map(normalizeLabel)
 
         var score = 0
         for label in labels {
-            score = max(score, hintMatchScore(label: label, hints: hints))
+            score = max(
+                score,
+                actionMode ? actionHintMatchScore(label: label, hints: hints) : hintMatchScore(label: label, hints: hints)
+            )
         }
 
-        if score > 0, let frame = elementFrame(element) {
+        if score > 0, let frame = elementFrame(element, in: windowBounds) {
             let area = frame.width * frame.height
             let windowArea = max(1, windowBounds.width * windowBounds.height)
             let isButtonLike = ["axbutton", "axmenuitem", "axlink", "axpopupbutton", "axcheckbox", "axradiobutton"]
@@ -330,21 +677,26 @@ final class ShowMeTargetFinder {
                 if isHuge && !isButtonLike { score = 0 }
                 if role.contains("axwebarea") || role.contains("axscrollarea") { score = 0 }
                 if role.contains("axgroup") && isHuge { score = 0 }
-                // List cells / static rows are common false positives for "message".
+                let smallExactControl = frame.height <= 52 && frame.width <= 220
                 if role.contains("axstatictext") || role.contains("axcell") || role.contains("axrow") {
-                    score = max(0, score - 10)
+                    if actionMode && smallExactControl && score >= 18 {
+                        score += 4
+                    } else {
+                        score = max(0, score - 10)
+                    }
                 }
                 if isButtonLike { score += 10 }
-                if frame.height <= 44, frame.width <= 260 { score += 4 }
+                if smallExactControl { score += 4 }
             } else if isHuge {
                 score = max(0, score - 8)
             }
 
             score += toolbarPositionBonus(frame: frame, windowBounds: windowBounds, hints: hints)
+            score += contentActionPositionBonus(frame: frame, windowBounds: windowBounds, hints: hints)
 
             if score >= 12 {
                 if best == nil || score > best!.score || (score == best!.score && area < best!.area) {
-                    best = (score, area, frame)
+                    best = (score, area, frame, element)
                 }
             }
         }
@@ -352,7 +704,7 @@ final class ShowMeTargetFinder {
         var children: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
               let childElements = children as? [AXUIElement] else { return }
-        for child in childElements.prefix(80) {
+        for child in childElements.prefix(100) {
             search(
                 element: child,
                 hints: hints,
@@ -360,6 +712,75 @@ final class ShowMeTargetFinder {
                 windowBounds: windowBounds,
                 preciseOnly: preciseOnly,
                 band: band,
+                actionMode: actionMode,
+                best: &best
+            )
+        }
+    }
+
+    private func searchMessageEditor(
+        element: AXUIElement,
+        depth: Int,
+        windowBounds: CGRect,
+        best: inout (score: Int, area: CGFloat, rect: CGRect, element: AXUIElement)?
+    ) {
+        guard depth < 22 else { return }
+        let role = normalizeLabel(elementRole(element) ?? "")
+        let labels = elementLabels(element, includeValue: false).map(normalizeLabel).joined(separator: " ")
+        let forbidden = ["recipient", "subject", "search", "email address", "add people", "carbon copy"]
+        let forbiddenShort = ["to", "cc", "bcc"].contains { word in
+            labels.range(of: #"\b"# + NSRegularExpression.escapedPattern(for: word) + #"\b"#, options: .regularExpression) != nil
+        }
+
+        var settable = DarwinBoolean(false)
+        let valueIsSettable = AXUIElementIsAttributeSettable(
+            element,
+            kAXValueAttribute as CFString,
+            &settable
+        ) == .success && settable.boolValue
+        let editableRole = role.contains("axtextarea") || role.contains("axtextfield")
+            || role.contains("axtextentryarea")
+
+        if (valueIsSettable || editableRole), !forbiddenShort,
+           !forbidden.contains(where: labels.contains),
+           let frame = elementFrame(element, in: windowBounds) {
+            let area = frame.width * frame.height
+            let windowArea = max(1, windowBounds.width * windowBounds.height)
+            guard frame.width >= 140, frame.height >= 36, area < windowArea * 0.55 else {
+                return searchEditorChildren(
+                    of: element,
+                    depth: depth,
+                    windowBounds: windowBounds,
+                    best: &best
+                )
+            }
+            var score = 20
+            if role.contains("axtextarea") || role.contains("axtextentryarea") { score += 16 }
+            if ["message", "reply", "compose", "body", "write"].contains(where: labels.contains) { score += 12 }
+            if valueIsSettable { score += 8 }
+            if frame.height >= 70 { score += 5 }
+            if best == nil || score > best!.score || (score == best!.score && area > best!.area) {
+                best = (score, area, frame, element)
+            }
+        }
+
+        searchEditorChildren(of: element, depth: depth, windowBounds: windowBounds, best: &best)
+    }
+
+    private func searchEditorChildren(
+        of element: AXUIElement,
+        depth: Int,
+        windowBounds: CGRect,
+        best: inout (score: Int, area: CGFloat, rect: CGRect, element: AXUIElement)?
+    ) {
+        var children: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+              let childElements = children as? [AXUIElement] else { return }
+        for child in childElements.prefix(100) {
+            searchMessageEditor(
+                element: child,
+                depth: depth + 1,
+                windowBounds: windowBounds,
                 best: &best
             )
         }
@@ -434,15 +855,28 @@ final class ShowMeTargetFinder {
         _ frame: CGRect,
         windowBounds: CGRect,
         band: ShowMeSearchBand,
-        toolbarBias: Bool
+        toolbarBias: Bool,
+        actionMode: Bool = false
     ) -> Bool {
         guard frame.width > 4, frame.height > 4 else { return false }
+        let visibleIntersection = frame.intersection(windowBounds)
+        let requiredOverlap = actionMode && frame.width <= 220 && frame.height <= 72 ? 0.35 : 0.7
+        guard !visibleIntersection.isNull,
+              visibleIntersection.width * visibleIntersection.height >= frame.width * frame.height * requiredOverlap else {
+            return false
+        }
 
         let topBandMinY = windowBounds.maxY - windowBounds.height * 0.22
         let inToolbarBand = frame.midY >= topBandMinY
 
         if band == .toolbar {
             return inToolbarBand
+        }
+
+        if band == .contentActions {
+            let belowChrome = frame.midY < windowBounds.maxY - windowBounds.height * 0.10
+            let rightOfSidebar = frame.midX > windowBounds.minX + windowBounds.width * 0.20
+            return belowChrome && rightOfSidebar
         }
 
         // Even in full search, reject inbox-list-looking cells for toolbar-ish steps.
@@ -463,6 +897,68 @@ final class ShowMeTargetFinder {
         if frame.midY >= topBandMinY { return 8 }
         if frame.midY >= windowBounds.maxY - windowBounds.height * 0.28 { return 3 }
         return -6
+    }
+
+    private func contentActionPositionBonus(frame: CGRect, windowBounds: CGRect, hints: [String]) -> Int {
+        guard isContentAction(hints, regionHint: nil) else { return 0 }
+        var bonus = 0
+        // Gmail / Outlook Reply sits in the lower reading pane.
+        if frame.midY < windowBounds.minY + windowBounds.height * 0.62 { bonus += 5 }
+        if frame.midX > windowBounds.minX + windowBounds.width * 0.30 { bonus += 3 }
+        return bonus
+    }
+
+    private func searchBand(for hints: [String]) -> ShowMeSearchBand {
+        if isContentAction(hints, regionHint: nil) { return .contentActions }
+        if isToolbarAction(hints, regionHint: nil) { return .toolbar }
+        return .full
+    }
+
+    private func expandedActionHints(_ hints: [String]) -> [String] {
+        var expanded = hints
+        let joined = hints.map(normalizeLabel).joined(separator: " ")
+        if containsWord("reply", in: joined) {
+            expanded.append(contentsOf: ["Reply", "Respond"])
+        }
+        if containsWord("respond", in: joined) {
+            expanded.append("Respond")
+        }
+        return Array(Set(expanded.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
+    }
+
+    private func actionHintMatchScore(label: String, hints: [String]) -> Int {
+        var score = hintMatchScore(label: label, hints: hints)
+        let normalized = normalizeLabel(label)
+        let wantsExactReply = hints.contains { normalizeLabel($0) == "reply" }
+        if wantsExactReply && normalized.contains("reply all") { score = max(0, score - 10) }
+        if wantsExactReply && normalized == "reply" { score = max(score, 32) }
+        if wantsExactReply && normalized.hasPrefix("reply"), normalized.count <= 14 { score = max(score, 22) }
+        if normalized.contains("reply") && normalized.contains("forward") { score = max(score, 20) }
+        return score
+    }
+
+    static func isReplyClickStep(_ hints: [String]) -> Bool {
+        hints.contains { hint in
+            let normalized = hint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return normalized == "reply" || normalized == "respond"
+        }
+    }
+
+    private func isContentAction(_ hints: [String], regionHint: String?) -> Bool {
+        let joined = (hints + [regionHint ?? ""]).map(normalizeLabel).joined(separator: " ")
+        if joined.contains("reply all") || joined.contains("forward") { return false }
+        return containsWord("reply", in: joined) || containsWord("respond", in: joined)
+    }
+
+    private func containsWord(_ word: String, in text: String) -> Bool {
+        let pattern = #"\b"# + NSRegularExpression.escapedPattern(for: word) + #"\b"#
+        return text.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    static func isBrowserContext(_ context: ActiveApplicationContext) -> Bool {
+        let id = context.bundleID.lowercased()
+        return id.contains("chrome") || id.contains("safari") || id.contains("firefox")
+            || id.contains("edge") || id.contains("brave") || id.contains("arc")
     }
 
     private func looksLikeInboxNoise(_ text: String) -> Bool {
@@ -542,7 +1038,7 @@ final class ShowMeTargetFinder {
         return labels
     }
 
-    private func elementFrame(_ element: AXUIElement) -> CGRect? {
+    private func elementFrame(_ element: AXUIElement, in windowBounds: CGRect) -> CGRect? {
         guard let posValue = copyAttribute(element, kAXPositionAttribute as String),
               let sizeValue = copyAttribute(element, kAXSizeAttribute as String),
               CFGetTypeID(posValue as CFTypeRef) == AXValueGetTypeID(),
@@ -555,7 +1051,22 @@ final class ShowMeTargetFinder {
         AXValueGetValue(posValue as! AXValue, .cgPoint, &position)
         AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
         guard size.width > 2, size.height > 2 else { return nil }
-        return CGRect(origin: position, size: size)
+        let native = CGRect(origin: position, size: size)
+        let converted = ScreenCoordinates.cocoaRect(fromQuartz: native)
+
+        // Browser AX implementations and mixed-display arrangements can report global
+        // frames in different conventions. Resolve against the exact remembered window
+        // instead of assuming the primary display's coordinate system.
+        let nativeOverlap = overlapRatio(native, windowBounds)
+        let convertedOverlap = overlapRatio(converted, windowBounds)
+        if nativeOverlap == 0, convertedOverlap == 0 { return nil }
+        return convertedOverlap > nativeOverlap ? converted : native
+    }
+
+    private func overlapRatio(_ frame: CGRect, _ bounds: CGRect) -> CGFloat {
+        let intersection = frame.intersection(bounds)
+        guard !intersection.isNull, frame.width > 0, frame.height > 0 else { return 0 }
+        return (intersection.width * intersection.height) / (frame.width * frame.height)
     }
 
     private func optionalAX(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {

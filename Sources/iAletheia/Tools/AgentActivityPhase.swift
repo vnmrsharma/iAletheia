@@ -7,6 +7,7 @@ enum AgentActivityPhase: Equatable, Sendable {
     case searching
     case drafting
     case guiding
+    case acting
 
     var displayText: String {
         switch self {
@@ -16,6 +17,7 @@ enum AgentActivityPhase: Equatable, Sendable {
         case .searching: return "Searching…"
         case .drafting: return "Drafting…"
         case .guiding: return "Planning Show Me…"
+        case .acting: return "Preparing safe action…"
         }
     }
 
@@ -27,6 +29,7 @@ enum AgentActivityPhase: Equatable, Sendable {
         case .searching: return "globe"
         case .drafting: return "text.bubble"
         case .guiding: return "hand.point.up.left"
+        case .acting: return "cursorarrow.motionlines"
         }
     }
 }

@@ -205,6 +205,152 @@ final class OpenAIResponseParserTests: XCTestCase {
     }
 }
 
+final class ActionSafetyPolicyTests: XCTestCase {
+    func testAllowsDraftRequestWithExplicitNoSendInstruction() {
+        XCTAssertNoThrow(
+            try ActionSafetyPolicy.validateRequest(
+                "Draft a response to this email but do not click Send"
+            )
+        )
+    }
+
+    func testRejectsRequestThatAsksToSend() {
+        XCTAssertThrowsError(
+            try ActionSafetyPolicy.validateRequest("Draft a response and send it")
+        )
+    }
+
+    func testAcceptsReplyThenTypePlan() {
+        let plan = DraftActionPlan(
+            summary: "Draft a reply without sending",
+            steps: [
+                DraftActionStep(kind: .click, title: "Open reply editor", targetHints: ["Reply"], text: nil),
+                DraftActionStep(kind: .typeText, title: "Type draft", targetHints: [], text: "Thanks for the update.")
+            ]
+        )
+        XCTAssertNoThrow(try ActionSafetyPolicy.validatePlan(plan))
+    }
+
+    func testRejectsPlanTargetingSend() {
+        let plan = DraftActionPlan(
+            summary: "Unsafe plan",
+            steps: [
+                DraftActionStep(kind: .click, title: "Send reply", targetHints: ["Send"], text: nil),
+                DraftActionStep(kind: .typeText, title: "Type draft", targetHints: [], text: "Hello")
+            ]
+        )
+        XCTAssertThrowsError(try ActionSafetyPolicy.validatePlan(plan))
+    }
+
+    func testNormalizerOpensReplyBeforeTypingOnReadOnlyEmail() {
+        let generated = DraftActionPlan(
+            summary: "Draft a reply",
+            steps: [
+                DraftActionStep(
+                    kind: .typeText,
+                    title: "Type the reply",
+                    targetHints: ["Message body"],
+                    text: "This is interesting. I would like to know more."
+                )
+            ]
+        )
+        let snapshot = LiveScreenSnapshot(
+            applicationName: "Safari",
+            bundleID: "com.apple.Safari",
+            windowTitle: "Mail - Outlook",
+            url: "https://outlook.cloud.microsoft/mail/inbox/id/example",
+            visibleText: "Inbox Archive Reply Reply all Forward Today's email content",
+            capturedAt: Date()
+        )
+
+        let normalized = DraftActionPlanNormalizer.normalize(
+            generated,
+            for: "Draft a quick reply to this email",
+            snapshot: snapshot
+        )
+
+        XCTAssertEqual(normalized.steps.map(\.kind), [.click, .typeText])
+        XCTAssertEqual(normalized.steps[0].targetHints, ["Reply"])
+        XCTAssertTrue(normalized.steps[1].targetHints.isEmpty)
+        XCTAssertNoThrow(try ActionSafetyPolicy.validatePlan(normalized))
+    }
+
+    func testNormalizerDoesNotReopenReplyWhenComposerIsVisible() {
+        let generated = DraftActionPlan(
+            summary: "Draft a reply",
+            steps: [
+                DraftActionStep(
+                    kind: .typeText,
+                    title: "Type the reply",
+                    targetHints: ["Message body"],
+                    text: "Thanks for the update."
+                )
+            ]
+        )
+        let snapshot = LiveScreenSnapshot(
+            applicationName: "Safari",
+            bundleID: "com.apple.Safari",
+            windowTitle: "Mail - Outlook",
+            url: "https://outlook.cloud.microsoft/mail/inbox/id/example",
+            visibleText: "Reply Send Discard Bcc Message body",
+            capturedAt: Date()
+        )
+
+        let normalized = DraftActionPlanNormalizer.normalize(
+            generated,
+            for: "Draft a reply",
+            snapshot: snapshot
+        )
+
+        XCTAssertEqual(normalized, generated)
+    }
+
+    func testNormalizerTurnsRewriteIntoSafeReplacementInOpenComposer() {
+        let generated = DraftActionPlan(
+            summary: "Rewrite the draft",
+            steps: [
+                DraftActionStep(
+                    kind: .typeText,
+                    title: "Type revised draft",
+                    targetHints: ["Message body"],
+                    text: "You are doing great work."
+                )
+            ]
+        )
+        let snapshot = LiveScreenSnapshot(
+            applicationName: "Safari",
+            bundleID: "com.apple.Safari",
+            windowTitle: "Mail - Outlook",
+            url: "https://outlook.cloud.microsoft/mail/inbox/id/example",
+            visibleText: "Reply Send Discard Bcc Message body Existing draft",
+            capturedAt: Date()
+        )
+
+        let normalized = DraftActionPlanNormalizer.normalize(
+            generated,
+            for: "Rewrite this draft and say you are doing great stuff",
+            snapshot: snapshot
+        )
+
+        XCTAssertEqual(normalized.steps.count, 1)
+        XCTAssertEqual(normalized.steps[0].kind, .replaceText)
+        XCTAssertEqual(normalized.steps[0].targetHints, ["Message body"])
+        XCTAssertNoThrow(try ActionSafetyPolicy.validatePlan(normalized))
+    }
+
+    func testRejectsMoreThanOneContentMutation() {
+        let plan = DraftActionPlan(
+            summary: "Unsafe ambiguous edit",
+            steps: [
+                DraftActionStep(kind: .typeText, title: "Type", targetHints: ["Message body"], text: "One"),
+                DraftActionStep(kind: .replaceText, title: "Replace", targetHints: ["Message body"], text: "Two")
+            ]
+        )
+
+        XCTAssertThrowsError(try ActionSafetyPolicy.validatePlan(plan))
+    }
+}
+
 private final class MockURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 

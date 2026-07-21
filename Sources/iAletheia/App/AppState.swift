@@ -12,6 +12,9 @@ final class AppState: ObservableObject {
     }
     @Published var webSearchEnabled = true
     @Published var showMeEnabled = false
+    @Published var actionEnabled = false
+    @Published var actionStatusText: String?
+    @Published var isActionRunning = false
     @Published var activeShowMeGuide: ShowMeGuideSession?
     @Published var showMeStatusText: String?
     @Published var isSearchingWeb = false
@@ -402,6 +405,11 @@ final class AppState: ObservableObject {
         setAgentPhase(.thinking)
         defer { isQuerying = false; isSearchingWeb = false }
 
+        if actionEnabled {
+            await runDraftAction(query: query, sessionID: sessionID)
+            return
+        }
+
         if showMeEnabled {
             await runShowMeGuide(query: query, sessionID: sessionID)
             return
@@ -463,6 +471,81 @@ final class AppState: ObservableObject {
             chatMessages.append(assistantMessage)
             persistChatTurn(sessionID: sessionID, message: assistantMessage)
         }
+    }
+
+    private func runDraftAction(query: String, sessionID: UUID) async {
+        setAgentPhase(.acting)
+        isActionRunning = true
+        defer {
+            isActionRunning = false
+            OwlWidgetController.shared.show(appState: self)
+        }
+        actionStatusText = "Checking the request and reading the current screen…"
+        do {
+            let deps = try dependencies
+            guard !isPrivateMode,
+                  cloudProcessingEnabled,
+                  permissionsGranted.accessibility,
+                  deps.openAIClient.isConfigured else {
+                throw ActionError.unavailable
+            }
+
+            let personality = preferencesStore.agentPreferences.personalityPrompt(profile: preferencesStore.profile)
+            let result = try await deps.actionPlanner.plan(query: query, personality: personality)
+            if let screenContext = result.screenContext, !screenContext.isEmpty {
+                lastScreenContext = screenContext
+            }
+
+            let notice = ChatMessage(
+                role: .assistant,
+                text: "Action mode is preparing this draft in \(result.context.applicationName). I will move the cursor and type, but I will not send, submit, or publish anything.",
+                timestamp: Date()
+            )
+            chatMessages.append(notice)
+            persistChatTurn(sessionID: sessionID, message: notice)
+
+            try await deps.actionExecutor.execute(
+                plan: result.plan,
+                context: result.context
+            ) { [weak self] status in
+                self?.actionStatusText = status
+                self?.queryStatusText = status
+            }
+
+            actionStatusText = "Draft complete — review it before sending."
+            let completionText = "The draft is now in the compose field. I did not send or submit it; please review it in the app."
+            assistantResponse = AssistantResponse(
+                answer: completionText,
+                sources: [],
+                usedMemoryIDs: [],
+                confidence: 0.95,
+                ambiguityNotice: nil,
+                route: .liveScreen
+            )
+            let completion = ChatMessage(role: .assistant, text: completionText, timestamp: Date())
+            chatMessages.append(completion)
+            persistChatTurn(sessionID: sessionID, message: completion)
+        } catch is CancellationError {
+            ShowMeOverlayController.shared.hide()
+            actionStatusText = ActionError.cancelled.localizedDescription
+            let message = ChatMessage(role: .assistant, text: ActionError.cancelled.localizedDescription, timestamp: Date())
+            chatMessages.append(message)
+            persistChatTurn(sessionID: sessionID, message: message)
+        } catch {
+            ShowMeOverlayController.shared.hide()
+            lastError = error.localizedDescription
+            actionStatusText = error.localizedDescription
+            let message = ChatMessage(role: .assistant, text: error.localizedDescription, timestamp: Date())
+            chatMessages.append(message)
+            persistChatTurn(sessionID: sessionID, message: message)
+        }
+    }
+
+    func cancelAction() {
+        guard isActionRunning, let deps = try? dependencies else { return }
+        deps.actionExecutor.cancel()
+        actionStatusText = "Stopping safely…"
+        queryStatusText = "Stopping action…"
     }
 
     private func runShowMeGuide(query: String, sessionID: UUID) async {

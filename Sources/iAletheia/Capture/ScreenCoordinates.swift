@@ -35,4 +35,21 @@ enum ScreenCoordinates {
     static func quartzPoint(fromCocoa point: CGPoint) -> CGPoint {
         CGPoint(x: point.x, y: mainDisplayHeight - point.y)
     }
+
+    /// Converts a Quartz-global rect to Cocoa-global using the screen that contains it.
+    static func cocoaRectForGlobalQuartz(_ rect: CGRect) -> CGRect {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        for screen in NSScreen.screens {
+            let screenQuartz = quartzRect(fromCocoa: screen.frame)
+            if screenQuartz.contains(center) {
+                return CGRect(
+                    x: rect.origin.x,
+                    y: screen.frame.maxY - (rect.origin.y - screenQuartz.minY) - rect.height,
+                    width: rect.width,
+                    height: rect.height
+                )
+            }
+        }
+        return cocoaRect(fromQuartz: rect)
+    }
 }

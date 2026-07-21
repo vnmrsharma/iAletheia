@@ -37,6 +37,8 @@ final class DependencyContainer {
     let openAIClient: OpenAIClient
     let personalAgent: PersonalAgent
     let showMePlanner: ShowMePlanner
+    let actionPlanner: ActionPlanner
+    let actionExecutor: ActionExecutor
 
     let episodeService: EpisodeService
 
@@ -118,6 +120,15 @@ final class DependencyContainer {
             observationPipeline: observationPipeline,
             activeApplicationService: activeApplicationService,
             screenCaptureService: screenCaptureService
+        )
+        actionPlanner = ActionPlanner(
+            openAIClient: openAIClient,
+            observationPipeline: observationPipeline,
+            activeApplicationService: activeApplicationService
+        )
+        actionExecutor = ActionExecutor(
+            screenCaptureService: screenCaptureService,
+            activeApplicationService: activeApplicationService
         )
     }
 }

@@ -53,6 +53,13 @@ struct AppSettingsView: View {
                     )
                 }
 
+                ThemedSectionCard(title: "Action Mode", subtitle: "Draft-only screen interaction") {
+                    ThemedInfoBanner(
+                        text: "Action mode can move the cursor, click a verified Reply or compose target, and type a draft. It cannot send, submit, publish, delete, purchase, or confirm actions.",
+                        style: .info
+                    )
+                }
+
                 ThemedSectionCard(title: "Privacy") {
                     VStack(alignment: .leading, spacing: 12) {
                         ThemedInfoBanner(text: "Memories stay on your Mac. Redacted context is sent only for enabled cloud features; screenshots are never saved or uploaded.", style: .success)
