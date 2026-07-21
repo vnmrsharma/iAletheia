@@ -39,6 +39,144 @@ struct DraftActionPlan: Codable, Equatable {
     let steps: [DraftActionStep]
 }
 
+/// Fresh screen state captured immediately before validating or executing a step.
+struct ActionScreenSnapshot {
+    let context: ActiveApplicationContext
+    let capture: WindowCaptureResult
+    let visibleText: String
+    let boxes: [ScreenCaptureService.OCRTextBox]
+
+    var windowBounds: CGRect { capture.cocoaBounds }
+}
+
+/// GPT vision result: where to click inside the current window screenshot.
+struct VisionClickTarget: Codable, Equatable {
+    let found: Bool
+    let targetLabel: String
+    /// Normalized X in the screenshot (0 = left edge, 1 = right edge).
+    let x: Double
+    /// Normalized Y in the screenshot (0 = top edge, 1 = bottom edge).
+    let y: Double
+    let confidence: Double
+    let reasoning: String
+
+    enum CodingKeys: String, CodingKey {
+        case found, x, y, confidence, reasoning
+        case targetLabel = "target_label"
+    }
+
+    /// Converts image-normalized top-left coordinates into Cocoa screen points.
+    func cocoaPoint(in windowBounds: CGRect) -> CGPoint {
+        let nx = min(1, max(0, x))
+        let ny = min(1, max(0, y))
+        return CGPoint(
+            x: windowBounds.minX + CGFloat(nx) * windowBounds.width,
+            y: windowBounds.maxY - CGFloat(ny) * windowBounds.height
+        )
+    }
+
+    func cocoaRect(in windowBounds: CGRect, size: CGSize = CGSize(width: 96, height: 36)) -> CGRect {
+        let point = cocoaPoint(in: windowBounds)
+        return CGRect(
+            x: point.x - size.width / 2,
+            y: point.y - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+}
+
+struct VisionGridSpec: Equatable {
+    let rows: Int
+    let columns: Int
+
+    static let actionGrid = VisionGridSpec(rows: 8, columns: 12)
+}
+
+/// A click grounded to a labeled screenshot grid. Offsets are within the chosen cell.
+struct GridVisionClickTarget: Codable, Equatable {
+    let found: Bool
+    let targetLabel: String
+    let gridRow: Int
+    let gridColumn: Int
+    let cellX: Double
+    let cellY: Double
+    let confidence: Double
+    let reasoning: String
+
+    enum CodingKeys: String, CodingKey {
+        case found, confidence, reasoning
+        case targetLabel = "target_label"
+        case gridRow = "grid_row"
+        case gridColumn = "grid_column"
+        case cellX = "cell_x"
+        case cellY = "cell_y"
+    }
+
+    func cocoaPoint(in windowBounds: CGRect, grid: VisionGridSpec) -> CGPoint? {
+        guard found,
+              grid.rows > 0, grid.columns > 0,
+              (0..<grid.rows).contains(gridRow),
+              (0..<grid.columns).contains(gridColumn),
+              (0...1).contains(cellX), (0...1).contains(cellY) else { return nil }
+        let normalizedX = (Double(gridColumn) + cellX) / Double(grid.columns)
+        let normalizedYFromTop = (Double(gridRow) + cellY) / Double(grid.rows)
+        return CGPoint(
+            x: windowBounds.minX + CGFloat(normalizedX) * windowBounds.width,
+            y: windowBounds.maxY - CGFloat(normalizedYFromTop) * windowBounds.height
+        )
+    }
+}
+
+/// GPT vision result: whether the last action succeeded and what to do next.
+struct VisionActionVerdict: Codable, Equatable {
+    enum UIState: String, Codable {
+        case readingEmail = "reading_email"
+        case composeOpen = "compose_open"
+        case composeFocused = "compose_focused"
+        case unknown
+    }
+
+    enum NextAction: String, Codable {
+        case clickReply = "click_reply"
+        case clickComposeBody = "click_compose_body"
+        case type
+        case retry
+        case done
+        case stop
+    }
+
+    let success: Bool
+    let state: UIState
+    let nextAction: NextAction
+    let found: Bool
+    let targetLabel: String
+    let x: Double
+    let y: Double
+    let confidence: Double
+    let reasoning: String
+
+    enum CodingKeys: String, CodingKey {
+        case success, state, found, x, y, confidence, reasoning
+        case nextAction = "next_action"
+        case targetLabel = "target_label"
+    }
+
+    var clickTarget: VisionClickTarget? {
+        guard found, nextAction == .clickReply || nextAction == .clickComposeBody || nextAction == .retry else {
+            return nil
+        }
+        return VisionClickTarget(
+            found: true,
+            targetLabel: targetLabel,
+            x: x,
+            y: y,
+            confidence: confidence,
+            reasoning: reasoning
+        )
+    }
+}
+
 /// Converts the model's visual interpretation into a safe UI state transition.
 /// A message-reading surface is not editable: Reply must open the composer first.
 enum DraftActionPlanNormalizer {
@@ -101,7 +239,11 @@ enum DraftActionPlanNormalizer {
         // A composer normally exposes Send together with another compose-only control.
         // Requiring the pair avoids treating the word "send" inside an email as UI state.
         let composeIsOpen = containsWord("send", in: screen)
-            && ["discard", "bcc", "format text", "pop out"].contains { screen.contains($0) }
+            && (
+                ["discard", "bcc", "format text", "pop out", "recipients", "subject", "linkedin", "scholar"]
+                    .contains { screen.contains($0) }
+                || screen.contains("more send")
+            )
         return asksForReply && replyIsVisible && !composeIsOpen
     }
 

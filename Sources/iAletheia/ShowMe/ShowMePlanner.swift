@@ -44,6 +44,15 @@ final class ShowMePlanner {
         }
 
         var resolved: [ShowMeResolvedStep] = []
+        let visionGrid = VisionGridSpec.actionGrid
+        let visionSnapshot: ActionScreenSnapshot? = if let context, openAIClient.isConfigured {
+            await targetFinder.captureActionSnapshot(context: context, captureService: screenCaptureService)
+        } else {
+            nil
+        }
+        let gridImage = visionSnapshot.flatMap {
+            screenCaptureService.gridAnnotatedJPEGBase64(from: $0.capture.image, grid: visionGrid)
+        }
         for step in plan.steps {
             var point: CGPoint?
             var rect: CGRect?
@@ -56,6 +65,24 @@ final class ShowMePlanner {
                 ) {
                     point = hit.point
                     rect = hit.rect
+                }
+                // Vision sees the full control and layout, avoiding fuzzy OCR matches such
+                // as a repository filename being mistaken for GitHub's “Go to file” button.
+                if let visionSnapshot, let gridImage,
+                   let vision = try? await openAIClient.locateShowMeTarget(
+                    instruction: step.instruction,
+                    targetHints: step.targetHints,
+                    appName: visionSnapshot.context.applicationName,
+                    windowTitle: visionSnapshot.context.windowTitle,
+                    imageJPEGBase64: gridImage,
+                    ocrText: visionSnapshot.visibleText,
+                    grid: visionGrid
+                   ),
+                   vision.found,
+                   vision.confidence >= 0.68,
+                   let grounded = vision.cocoaPoint(in: visionSnapshot.windowBounds, grid: visionGrid) {
+                    point = grounded
+                    rect = CGRect(x: grounded.x - 48, y: grounded.y - 18, width: 96, height: 36)
                 }
             }
             resolved.append(

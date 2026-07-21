@@ -498,7 +498,7 @@ final class AppState: ObservableObject {
 
             let notice = ChatMessage(
                 role: .assistant,
-                text: "Action mode is preparing this draft in \(result.context.applicationName). I will move the cursor and type, but I will not send, submit, or publish anything.",
+                text: "Drafting in \(result.context.applicationName) — I will click and type, but I will not send anything.",
                 timestamp: Date()
             )
             chatMessages.append(notice)

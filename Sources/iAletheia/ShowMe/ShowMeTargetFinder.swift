@@ -432,57 +432,160 @@ final class ShowMeTargetFinder {
         }
     }
 
-    /// Clicks the inline compose body after Reply opens in Gmail / Outlook web.
+    /// Clicks the inline compose body using a fresh post-Reply screenshot.
     func resolveComposeBodyTarget(
         context: ActiveApplicationContext,
         captureService: ScreenCaptureService
     ) async -> ShowMeActionTarget? {
-        if let ax = resolveMessageEditor(context: context) {
-            return ax
+        guard let snapshot = await captureActionSnapshot(context: context, captureService: captureService) else {
+            return nil
         }
-        return await OwlWidgetController.shared.withPanelHiddenForCapture {
+        return resolveComposeBody(in: snapshot)
+    }
+
+    func captureActionSnapshot(
+        context: ActiveApplicationContext,
+        captureService: ScreenCaptureService
+    ) async -> ActionScreenSnapshot? {
+        await OwlWidgetController.shared.withPanelHiddenForCapture {
             guard let capture = try? await captureService.captureActiveWindow(
                 for: context.pid,
                 windowID: context.windowID,
                 windowBounds: context.windowBounds
-            ),
-            let boxes = try? await captureService.ocrTextBoxes(from: capture.image) else { return nil }
+            ) else { return nil }
+            // Single OCR pass — boxes are enough for text + geometry.
+            let boxes = (try? await captureService.ocrTextBoxes(from: capture.image)) ?? []
+            let visibleText = boxes.map(\.text).joined(separator: "\n")
+            return ActionScreenSnapshot(
+                context: context,
+                capture: capture,
+                visibleText: visibleText,
+                boxes: boxes
+            )
+        }
+    }
 
-            let bounds = capture.cocoaBounds
-            var anchorRect: CGRect?
-            for box in mergeAdjacentOCRBoxes(boxes) {
-                let label = normalizeLabel(box.text)
-                if label.contains("recipient") || label == "to" || label.hasPrefix("to ") {
-                    let rect = ScreenCaptureService.screenRect(
-                        forNormalizedVisionBox: box.normalizedBounds,
-                        windowCocoaBounds: bounds
-                    )
-                    if rect.midX > bounds.minX + bounds.width * 0.22 {
-                        anchorRect = rect
-                        break
-                    }
+    func composeVisible(in snapshot: ActionScreenSnapshot) -> Bool {
+        // A browser's page-level AXWebArea can appear writable even in read-only email
+        // view. Only trust AX editor discovery in native apps; webmail must show compose UI.
+        if !Self.isBrowserContext(snapshot.context),
+           resolveMessageEditor(context: snapshot.context) != nil { return true }
+        let text = snapshot.visibleText.lowercased()
+        let hasSend = containsWord("send", in: text)
+        let fullCompose = ["recipients", "discard", "bcc", "subject"].contains { text.contains($0) }
+        // Gmail inline bottom reply: Send button in the lower strip, often with signature links.
+        let inlineCompose = boxesContainSendButton(in: snapshot)
+        return hasSend && (fullCompose || inlineCompose)
+    }
+
+    private func boxesContainSendButton(in snapshot: ActionScreenSnapshot) -> Bool {
+        let bounds = snapshot.windowBounds
+        for box in snapshot.boxes + mergeAdjacentOCRBoxes(snapshot.boxes) {
+            let label = normalizeLabel(box.text)
+            guard label == "send" || label.hasPrefix("send ") else { continue }
+            let rect = ScreenCaptureService.screenRect(
+                forNormalizedVisionBox: box.normalizedBounds,
+                windowCocoaBounds: bounds
+            )
+            if rect.midY <= bounds.minY + bounds.height * 0.45,
+               rect.height <= 64,
+               rect.width <= 160 {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Locates the message body from the current screenshot (after Reply reshapes the page).
+    func resolveComposeBody(in snapshot: ActionScreenSnapshot) -> ShowMeActionTarget? {
+        // Browser AX frequently exposes a large writable AXWebArea for the entire page.
+        // It is not the compose body, even though AXValue happens to be settable.
+        if !Self.isBrowserContext(snapshot.context),
+           let ax = resolveMessageEditor(context: snapshot.context) {
+            return ax
+        }
+
+        let bounds = snapshot.windowBounds
+        let merged = snapshot.boxes + mergeAdjacentOCRBoxes(snapshot.boxes)
+        var recipientsRect: CGRect?
+        var sendRect: CGRect?
+        var discardRect: CGRect?
+
+        for box in merged {
+            let label = normalizeLabel(box.text)
+            let rect = ScreenCaptureService.screenRect(
+                forNormalizedVisionBox: box.normalizedBounds,
+                windowCocoaBounds: bounds
+            )
+            guard rect.midX > bounds.minX + bounds.width * 0.22 else { continue }
+
+            if label.contains("recipient") || label == "to" {
+                if recipientsRect == nil || rect.maxY > recipientsRect!.maxY {
+                    recipientsRect = rect
                 }
             }
-
-            let bodyRect: CGRect
-            if let anchorRect {
-                let bodyHeight = max(72, bounds.height * 0.14)
-                bodyRect = CGRect(
-                    x: anchorRect.minX,
-                    y: anchorRect.minY - bodyHeight - 8,
-                    width: min(bounds.width * 0.58, max(anchorRect.width * 2.4, 300)),
-                    height: bodyHeight
-                )
-            } else {
-                bodyRect = CGRect(
-                    x: bounds.minX + bounds.width * 0.30,
-                    y: bounds.minY + bounds.height * 0.34,
-                    width: bounds.width * 0.55,
-                    height: bounds.height * 0.22
-                )
+            if label == "send" || label.hasPrefix("send ") {
+                if sendRect == nil || rect.midY < sendRect!.midY {
+                    sendRect = rect
+                }
             }
+            if label.contains("discard") {
+                discardRect = rect
+            }
+        }
+
+        if let recipientsRect, let sendRect, recipientsRect.minY > sendRect.maxY + 24 {
+            let insetX = max(recipientsRect.minX, bounds.minX + bounds.width * 0.28)
+            let bodyMinY = sendRect.maxY + 14
+            let bodyMaxY = recipientsRect.minY - 10
+            let height = bodyMaxY - bodyMinY
+            guard height >= 36 else { return nil }
+            let bodyRect = CGRect(
+                x: insetX,
+                y: bodyMinY,
+                width: min(bounds.width * 0.56, max(recipientsRect.width * 2.8, 320)),
+                height: height
+            )
             return ShowMeActionTarget(point: pointInRect(bodyRect), rect: bodyRect, element: nil)
         }
+
+        if let sendRect {
+            // Gmail bottom reply: writing area is ABOVE the Send/toolbar row, across the reading pane.
+            let bodyHeight = max(72, min(140, bounds.height * 0.13))
+            let bodyRect = CGRect(
+                x: bounds.minX + bounds.width * 0.34,
+                y: sendRect.maxY + 20,
+                width: bounds.width * 0.50,
+                height: bodyHeight
+            )
+            let clamped = bodyRect.intersection(bounds.insetBy(dx: 8, dy: 8))
+            if clamped.width >= 120, clamped.height >= 40 {
+                return ShowMeActionTarget(point: pointInRect(clamped), rect: clamped, element: nil)
+            }
+        }
+
+        if let recipientsRect {
+            let bodyHeight = max(80, bounds.height * 0.15)
+            let bodyRect = CGRect(
+                x: recipientsRect.minX,
+                y: recipientsRect.minY - bodyHeight - 12,
+                width: min(bounds.width * 0.54, 520),
+                height: bodyHeight
+            )
+            return ShowMeActionTarget(point: pointInRect(bodyRect), rect: bodyRect, element: nil)
+        }
+
+        if let discardRect {
+            let bodyRect = CGRect(
+                x: discardRect.minX,
+                y: discardRect.maxY + 20,
+                width: min(bounds.width * 0.52, 480),
+                height: max(72, bounds.height * 0.14)
+            )
+            return ShowMeActionTarget(point: pointInRect(bodyRect), rect: bodyRect, element: nil)
+        }
+
+        return nil
     }
 
     func composeIsOpen(
@@ -759,6 +862,10 @@ final class ShowMeTargetFinder {
             if ["message", "reply", "compose", "body", "write"].contains(where: labels.contains) { score += 12 }
             if valueIsSettable { score += 8 }
             if frame.height >= 70 { score += 5 }
+            // Inline compose opens in the lower reading pane — not the original email body above.
+            let lowerBand = windowBounds.minY + windowBounds.height * 0.48
+            if frame.midY <= lowerBand { score += 14 }
+            if frame.midY > windowBounds.minY + windowBounds.height * 0.68 { score -= 18 }
             if best == nil || score > best!.score || (score == best!.score && area > best!.area) {
                 best = (score, area, frame, element)
             }
@@ -972,13 +1079,7 @@ final class ShowMeTargetFinder {
     }
 
     private func pointInRect(_ rect: CGRect) -> CGPoint {
-        if rect.width <= 200, rect.height <= 56 {
-            return CGPoint(x: rect.midX, y: rect.midY)
-        }
-        return CGPoint(
-            x: rect.minX + min(22, max(10, rect.width * 0.15)),
-            y: rect.midY
-        )
+        CGPoint(x: rect.midX, y: rect.midY)
     }
 
     private func elementRole(_ element: AXUIElement) -> String? {

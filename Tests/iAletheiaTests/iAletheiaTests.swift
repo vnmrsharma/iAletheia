@@ -206,6 +206,40 @@ final class OpenAIResponseParserTests: XCTestCase {
 }
 
 final class ActionSafetyPolicyTests: XCTestCase {
+    func testGridVisionTargetMapsTopLeftCellToCocoaCoordinates() {
+        let target = GridVisionClickTarget(
+            found: true,
+            targetLabel: "Reply",
+            gridRow: 0,
+            gridColumn: 0,
+            cellX: 0.5,
+            cellY: 0.5,
+            confidence: 0.9,
+            reasoning: "Visible Reply button"
+        )
+        let point = target.cocoaPoint(
+            in: CGRect(x: 100, y: 200, width: 1200, height: 800),
+            grid: .actionGrid
+        )
+        XCTAssertNotNil(point)
+        XCTAssertEqual(point!.x, 150, accuracy: 0.001)
+        XCTAssertEqual(point!.y, 950, accuracy: 0.001)
+    }
+
+    func testGridVisionTargetRejectsOutOfRangeCell() {
+        let target = GridVisionClickTarget(
+            found: true,
+            targetLabel: "Reply",
+            gridRow: 8,
+            gridColumn: 0,
+            cellX: 0.5,
+            cellY: 0.5,
+            confidence: 0.9,
+            reasoning: "Invalid row"
+        )
+        XCTAssertNil(target.cocoaPoint(in: CGRect(x: 0, y: 0, width: 1200, height: 800), grid: .actionGrid))
+    }
+
     func testAllowsDraftRequestWithExplicitNoSendInstruction() {
         XCTAssertNoThrow(
             try ActionSafetyPolicy.validateRequest(
@@ -303,6 +337,43 @@ final class ActionSafetyPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(normalized, generated)
+    }
+
+    func testNormalizerSkipsReplyForGmailInlineComposerWithSendAndSignature() {
+        let generated = DraftActionPlan(
+            summary: "Draft a reply",
+            steps: [
+                DraftActionStep(
+                    kind: .click,
+                    title: "Open reply",
+                    targetHints: ["Reply"],
+                    text: nil
+                ),
+                DraftActionStep(
+                    kind: .typeText,
+                    title: "Type the reply",
+                    targetHints: [],
+                    text: "Thanks for the update."
+                )
+            ]
+        )
+        let snapshot = LiveScreenSnapshot(
+            applicationName: "Google Chrome",
+            bundleID: "com.google.Chrome",
+            windowTitle: "Inbox - Gmail",
+            url: "https://mail.google.com/mail/u/0/#inbox/abc",
+            visibleText: "Reply Send LinkedIn Google Scholar Vinamra Sharma Thanks for reading",
+            capturedAt: Date()
+        )
+
+        let normalized = DraftActionPlanNormalizer.normalize(
+            generated,
+            for: "Draft a reply to this email",
+            snapshot: snapshot
+        )
+
+        XCTAssertEqual(normalized.steps.map(\.kind), [.typeText])
+        XCTAssertEqual(normalized.steps[0].text, "Thanks for the update.")
     }
 
     func testNormalizerTurnsRewriteIntoSafeReplacementInOpenComposer() {

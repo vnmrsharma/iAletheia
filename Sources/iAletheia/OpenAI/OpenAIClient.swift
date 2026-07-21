@@ -600,8 +600,8 @@ final class OpenAIClient {
             \(personality)
             """,
             prompt: prompt,
-            maxOutputTokens: 1_400,
-            effort: .medium,
+            maxOutputTokens: 1_000,
+            effort: .low,
             verbosity: .low,
             jsonSchema: Self.draftActionSchema
         )
@@ -609,6 +609,148 @@ final class OpenAIClient {
             throw ActionError.invalidPlan
         }
         return plan
+    }
+
+    /// Locates a UI control in a live window screenshot using vision + reasoning.
+    func locateActionClick(
+        goal: String,
+        appName: String,
+        windowTitle: String?,
+        imageJPEGBase64: String,
+        ocrText: String?,
+        grid: VisionGridSpec
+    ) async throws -> GridVisionClickTarget {
+        var prompt = """
+        Goal: \(goal)
+        Active app: \(appName)
+        Window title: \(windowTitle ?? "unknown")
+
+        Look at the attached screenshot of the active window.
+        Return the exact click point for the control that advances the goal.
+        The screenshot has a labeled (grid.rows)-row by (grid.columns)-column grid.
+        R0C0 is the top-left cell. Return grid_row and grid_column, then cell_x and
+        cell_y from 0 to 1 within that cell (both measured from its top-left).
+        Put the point safely inside the target, not on its border or label text.
+        Prefer the visible Reply / Respond button when the goal is opening a reply (the labeled button next to Forward, not a tiny icon beside Send).
+        Prefer the empty message-body compose area ABOVE the Send button when the goal is focusing the draft field.
+        Never target Send, Post, Submit, Publish, Delete, recipient/subject fields, or the Reply arrow icon inside an already-open composer.
+        """
+        if let ocrText, !ocrText.isEmpty {
+            prompt += "\n\nOCR text from the same window (may be noisy):\n\(String(ocrText.prefix(3_500)))"
+        }
+
+        let result = try await createResponse(
+            model: configuration().reasoningModel,
+            instructions: """
+            You are a precise UI locator for a draft-only macOS agent.
+            In Gmail reading view, Reply sits at the bottom next to Forward — not in the inbox list.
+            In Gmail compose / bottom reply bar, the editable body is the writing area ABOVE the blue Send button — never the Reply arrow icon beside Send, and never Send itself.
+            Return found=false only if the target truly is not visible.
+            """,
+            prompt: prompt,
+            maxOutputTokens: 500,
+            effort: .medium,
+            verbosity: .low,
+            jsonSchema: Self.visionClickSchema,
+            imageJPEGBase64: imageJPEGBase64
+        )
+        guard let target = try? JSONDecoder().decode(GridVisionClickTarget.self, from: Data(result.text.utf8)) else {
+            throw ActionError.invalidPlan
+        }
+        return target
+    }
+
+    /// Grounds a Show Me pointer to the labeled screenshot grid. Unlike Action mode,
+    /// this only identifies a location and never performs the click.
+    func locateShowMeTarget(
+        instruction: String,
+        targetHints: [String],
+        appName: String,
+        windowTitle: String?,
+        imageJPEGBase64: String,
+        ocrText: String?,
+        grid: VisionGridSpec
+    ) async throws -> GridVisionClickTarget {
+        var prompt = """
+        Instruction being shown to the user: \(instruction)
+        Target labels or descriptions: \(targetHints.joined(separator: ", "))
+        Active app: \(appName)
+        Window title: \(windowTitle ?? "unknown")
+
+        Locate the exact visible UI control the instruction refers to.
+        The screenshot has a \(grid.rows)-row by \(grid.columns)-column labeled grid.
+        R0C0 is top-left. Return its grid_row and grid_column, plus cell_x and cell_y
+        from 0 to 1 within the chosen cell, measured from that cell's top-left.
+        Point inside the clickable control, preferably its center. Do not choose page
+        content that merely contains one word from the target label.
+        """
+        if let ocrText, !ocrText.isEmpty {
+            prompt += "\n\nOCR text from this screenshot (may be noisy):\n\(String(ocrText.prefix(3_500)))"
+        }
+        let result = try await createResponse(
+            model: configuration().reasoningModel,
+            instructions: """
+            You are a precise visual UI grounding system. Match the complete instruction
+            and full target phrase to the actual visible control. Use surrounding layout,
+            control shape, and semantic role. Return found=false when it is not visible.
+            """,
+            prompt: prompt,
+            maxOutputTokens: 500,
+            effort: .medium,
+            verbosity: .low,
+            jsonSchema: Self.visionClickSchema,
+            imageJPEGBase64: imageJPEGBase64
+        )
+        guard let target = try? JSONDecoder().decode(GridVisionClickTarget.self, from: Data(result.text.utf8)) else {
+            throw ActionError.invalidPlan
+        }
+        return target
+    }
+
+    /// Inspects a fresh post-action screenshot and decides whether to continue, retry, or type.
+    func validateActionScreen(
+        intendedStep: String,
+        appName: String,
+        windowTitle: String?,
+        imageJPEGBase64: String,
+        ocrText: String?
+    ) async throws -> VisionActionVerdict {
+        var prompt = """
+        Intended step just performed: \(intendedStep)
+        Active app: \(appName)
+        Window title: \(windowTitle ?? "unknown")
+
+        Inspect the attached screenshot taken AFTER the last action.
+        Decide the current UI state and the single safest next draft-only action.
+        If a click is still needed, return normalized coordinates (x left→right, y top→bottom).
+        Never recommend Send / Submit / Publish / Delete.
+        """
+        if let ocrText, !ocrText.isEmpty {
+            prompt += "\n\nOCR text from the same window (may be noisy):\n\(String(ocrText.prefix(3_500)))"
+        }
+
+        let result = try await createResponse(
+            model: configuration().reasoningModel,
+            instructions: """
+            You verify draft-only UI actions from screenshots.
+            reading_email = an email is open for reading and Reply/Forward are visible; no composer yet.
+            compose_open = reply/compose UI is visible (Recipients / Send / Discard) but the message body may not be focused.
+            compose_focused = a writable message body is clearly ready for typing.
+            If Reply was intended but the screen is still reading_email, set success=false and next_action=click_reply with coordinates.
+            If compose is open but the body is not focused, set next_action=click_compose_body with coordinates of the empty body area.
+            If the body is ready for typing, set next_action=type and success=true.
+            """,
+            prompt: prompt,
+            maxOutputTokens: 800,
+            effort: .medium,
+            verbosity: .low,
+            jsonSchema: Self.visionVerdictSchema,
+            imageJPEGBase64: imageJPEGBase64
+        )
+        guard let verdict = try? JSONDecoder().decode(VisionActionVerdict.self, from: Data(result.text.utf8)) else {
+            throw ActionError.invalidPlan
+        }
+        return verdict
     }
 
     private func structuredAssistantResponse(
@@ -665,14 +807,27 @@ final class OpenAIClient {
         effort: OpenAIReasoningEffort,
         verbosity: OpenAITextVerbosity,
         jsonSchema: [String: Any]? = nil,
-        useWebSearch: Bool = false
+        useWebSearch: Bool = false,
+        imageJPEGBase64: String? = nil
     ) async throws -> OpenAIResponseResult {
         let config = configuration()
         guard let apiKey = config.apiKey, !apiKey.isEmpty else { throw OpenAIError.missingAPIKey }
         guard let url = config.responsesURL else { throw OpenAIError.invalidURL }
 
-        var input = history.suffix(12).map { ["role": $0.role, "content": $0.content] }
-        input.append(["role": "user", "content": prompt])
+        var input: [[String: Any]] = history.suffix(12).map { ["role": $0.role, "content": $0.content] }
+        if let imageJPEGBase64, !imageJPEGBase64.isEmpty {
+            let content: [[String: Any]] = [
+                ["type": "input_text", "text": prompt],
+                [
+                    "type": "input_image",
+                    "image_url": "data:image/jpeg;base64,\(imageJPEGBase64)",
+                    "detail": "original"
+                ]
+            ]
+            input.append(["role": "user", "content": content])
+        } else {
+            input.append(["role": "user", "content": prompt])
+        }
 
         var textConfiguration: [String: Any] = ["verbosity": verbosity.rawValue]
         if let jsonSchema { textConfiguration["format"] = jsonSchema }
@@ -695,7 +850,7 @@ final class OpenAIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = useWebSearch ? 120 : 90
+        request.timeoutInterval = useWebSearch || imageJPEGBase64 != nil ? 120 : 90
         request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -835,6 +990,58 @@ final class OpenAIClient {
                 ]
             ],
             "required": ["summary", "steps"],
+            "additionalProperties": false
+        ]
+    ]
+
+    private static let visionClickSchema: [String: Any] = [
+        "type": "json_schema",
+        "name": "vision_click_target",
+        "strict": true,
+        "schema": [
+            "type": "object",
+            "properties": [
+                "found": ["type": "boolean"],
+                "target_label": ["type": "string"],
+                "grid_row": ["type": "integer", "minimum": 0, "maximum": 7],
+                "grid_column": ["type": "integer", "minimum": 0, "maximum": 11],
+                "cell_x": ["type": "number", "minimum": 0, "maximum": 1],
+                "cell_y": ["type": "number", "minimum": 0, "maximum": 1],
+                "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                "reasoning": ["type": "string"]
+            ],
+            "required": ["found", "target_label", "grid_row", "grid_column", "cell_x", "cell_y", "confidence", "reasoning"],
+            "additionalProperties": false
+        ]
+    ]
+
+    private static let visionVerdictSchema: [String: Any] = [
+        "type": "json_schema",
+        "name": "vision_action_verdict",
+        "strict": true,
+        "schema": [
+            "type": "object",
+            "properties": [
+                "success": ["type": "boolean"],
+                "state": [
+                    "type": "string",
+                    "enum": ["reading_email", "compose_open", "compose_focused", "unknown"]
+                ],
+                "next_action": [
+                    "type": "string",
+                    "enum": ["click_reply", "click_compose_body", "type", "retry", "done", "stop"]
+                ],
+                "found": ["type": "boolean"],
+                "target_label": ["type": "string"],
+                "x": ["type": "number", "minimum": 0, "maximum": 1],
+                "y": ["type": "number", "minimum": 0, "maximum": 1],
+                "confidence": ["type": "number", "minimum": 0, "maximum": 1],
+                "reasoning": ["type": "string"]
+            ],
+            "required": [
+                "success", "state", "next_action", "found", "target_label",
+                "x", "y", "confidence", "reasoning"
+            ],
             "additionalProperties": false
         ]
     ]

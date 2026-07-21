@@ -311,6 +311,95 @@ final class ScreenCaptureService {
         return context.makeImage() ?? image
     }
 
+    /// JPEG base64 for vision models (keeps payloads small enough for Responses API).
+    func jpegBase64(from image: CGImage, maxDimension: CGFloat = 1280, quality: CGFloat = 0.72) -> String? {
+        let nsImage: NSImage
+        let longest = CGFloat(max(image.width, image.height))
+        if longest > maxDimension {
+            let scale = maxDimension / longest
+            let size = NSSize(
+                width: max(1, CGFloat(image.width) * scale),
+                height: max(1, CGFloat(image.height) * scale)
+            )
+            nsImage = NSImage(size: size)
+            nsImage.lockFocus()
+            NSGraphicsContext.current?.imageInterpolation = .medium
+            NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                .draw(in: NSRect(origin: .zero, size: size))
+            nsImage.unlockFocus()
+        } else {
+            nsImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }
+
+        guard let tiff = nsImage.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let data = rep.representation(using: .jpeg, properties: [.compressionFactor: quality]) else {
+            return nil
+        }
+        return data.base64EncodedString()
+    }
+
+    /// Adds a labeled grid without changing the screenshot aspect ratio. Labels use
+    /// top-left row/column coordinates (R0C0 is the top-left cell).
+    func gridAnnotatedJPEGBase64(
+        from image: CGImage,
+        grid: VisionGridSpec,
+        maxDimension: CGFloat = 1600,
+        quality: CGFloat = 0.78
+    ) -> String? {
+        guard grid.rows > 0, grid.columns > 0 else { return nil }
+        let longest = CGFloat(max(image.width, image.height))
+        let scale = min(1, maxDimension / max(1, longest))
+        let size = NSSize(
+            width: max(1, CGFloat(image.width) * scale),
+            height: max(1, CGFloat(image.height) * scale)
+        )
+        let canvas = NSImage(size: size)
+        canvas.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        NSImage(cgImage: image, size: size).draw(in: NSRect(origin: .zero, size: size))
+
+        let path = NSBezierPath()
+        path.lineWidth = max(1, size.width / 900)
+        NSColor.systemYellow.withAlphaComponent(0.78).setStroke()
+        for column in 1..<grid.columns {
+            let x = size.width * CGFloat(column) / CGFloat(grid.columns)
+            path.move(to: NSPoint(x: x, y: 0))
+            path.line(to: NSPoint(x: x, y: size.height))
+        }
+        for row in 1..<grid.rows {
+            let y = size.height * CGFloat(row) / CGFloat(grid.rows)
+            path.move(to: NSPoint(x: 0, y: y))
+            path.line(to: NSPoint(x: size.width, y: y))
+        }
+        path.stroke()
+
+        let cellWidth = size.width / CGFloat(grid.columns)
+        let cellHeight = size.height / CGFloat(grid.rows)
+        let fontSize = max(9, min(15, size.width / 105))
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .bold),
+            .foregroundColor: NSColor.white,
+            .backgroundColor: NSColor.black.withAlphaComponent(0.72)
+        ]
+        for row in 0..<grid.rows {
+            for column in 0..<grid.columns {
+                let label = "R\(row)C\(column)" as NSString
+                let x = CGFloat(column) * cellWidth + 3
+                let y = size.height - CGFloat(row + 1) * cellHeight + cellHeight - fontSize - 5
+                label.draw(at: NSPoint(x: x, y: y), withAttributes: attributes)
+            }
+        }
+        canvas.unlockFocus()
+
+        guard let tiff = canvas.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let data = rep.representation(using: .jpeg, properties: [.compressionFactor: quality]) else {
+            return nil
+        }
+        return data.base64EncodedString()
+    }
+
     private func streamConfiguration(width: Int, height: Int) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.width = min(max(width, 1), 1920)

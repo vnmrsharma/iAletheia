@@ -128,7 +128,8 @@ final class DependencyContainer {
         )
         actionExecutor = ActionExecutor(
             screenCaptureService: screenCaptureService,
-            activeApplicationService: activeApplicationService
+            activeApplicationService: activeApplicationService,
+            openAIClient: openAIClient
         )
     }
 }
